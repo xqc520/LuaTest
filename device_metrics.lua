@@ -10,6 +10,10 @@ local gnss = require("gnss")
 
 local M = {}
 
+-- ---------------------------------------------------------------------------
+-- Sampling / conversion configuration
+-- ---------------------------------------------------------------------------
+
 local BATTERY_ADC_ID = 0
 local BATTERY_R_TOP_OHM = 170000
 local BATTERY_R_BOTTOM_OHM = 10000
@@ -47,6 +51,7 @@ local VALID_TIME_MIN = 1700000000
 local PERIODIC_STATUS_LOG_DIR = "/sd/log/status"
 local STORAGE_CACHE_TTL_MS = 30 * 1000
 
+-- Cached snapshots avoid repeated ADC / storage reads during field logs.
 local cache = {
     updated_at = 0,
     snapshot = nil
@@ -56,6 +61,10 @@ local storage_cache = {
     updated_at = 0,
     snapshot = nil
 }
+
+-- ---------------------------------------------------------------------------
+-- Generic helpers
+-- ---------------------------------------------------------------------------
 
 local function now_ms()
     if mcu and type(mcu.ticks) == "function" and type(mcu.hz) == "function" then
@@ -107,6 +116,10 @@ end
 local function get_device_sn()
     return mqtt_topics.get_device_sn("NO_SN")
 end
+
+-- ---------------------------------------------------------------------------
+-- Formatting helpers used by logs / HTTP / MQTT responses
+-- ---------------------------------------------------------------------------
 
 local function format_voltage(mv)
     local value = tonumber(mv)
@@ -163,6 +176,10 @@ local function build_periodic_status_log_path(timestamp)
     )
 end
 
+-- ---------------------------------------------------------------------------
+-- Device identity helpers
+-- ---------------------------------------------------------------------------
+
 local function read_mobile_text(method_name, default)
     if not mobile or type(mobile[method_name]) ~= "function" then
         return default or ""
@@ -205,6 +222,10 @@ local function read_mobile_number(method_name)
 
     return nil
 end
+
+-- ---------------------------------------------------------------------------
+-- ADC and sensor helpers
+-- ---------------------------------------------------------------------------
 
 local function average_trimmed_samples(samples)
     if type(samples) ~= "table" or #samples == 0 then
@@ -762,6 +783,10 @@ local function to_json_integer_or_null(value, divisor)
     return round(number / divisor)
 end
 
+-- ---------------------------------------------------------------------------
+-- Periodic device status reporting (every 10 minutes)
+-- ---------------------------------------------------------------------------
+
 function M.build_periodic_status_payload(snapshot, timestamp)
     snapshot = snapshot or M.get_snapshot(true)
     local battery = snapshot.battery or {}
@@ -846,6 +871,10 @@ function M.start_periodic_realtime_reporter(server_id)
         end
     end, task_name)
 end
+
+-- ---------------------------------------------------------------------------
+-- MQTT command entry
+-- ---------------------------------------------------------------------------
 
 function M.handle_command(server_id, obj)
     if type(obj) ~= "table" then

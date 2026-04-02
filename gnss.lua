@@ -4,6 +4,10 @@ local exgnss = require("exgnss")
 
 local M = {}
 
+-- ---------------------------------------------------------------------------
+-- GNSS runtime configuration
+-- ---------------------------------------------------------------------------
+
 local GNSS_MODE = 2
 local AGPS_ENABLE = false
 local BOOT_OPEN_DELAY_MS = 5000
@@ -14,6 +18,10 @@ local GNSS_APP_TAG = "project"
 local MIN_SATELLITES = 5
 local MAX_HDOP = 3
 local REQUIRED_STABLE_FIXES = 3
+
+-- ---------------------------------------------------------------------------
+-- Runtime state
+-- ---------------------------------------------------------------------------
 
 local started = false
 local setup_done = false
@@ -30,6 +38,10 @@ local last_quality = {
     stable_count = 0
 }
 
+-- ---------------------------------------------------------------------------
+-- Small helpers
+-- ---------------------------------------------------------------------------
+
 local function set_reason(reason)
     last_reason = tostring(reason or "unknown")
 end
@@ -44,6 +56,10 @@ local function save_location(lat, lng)
     last_location.time = tonumber(os.time()) or 0
     set_reason("fixed")
 end
+
+-- ---------------------------------------------------------------------------
+-- GNSS library compatibility wrappers
+-- ---------------------------------------------------------------------------
 
 local function call_first(fn1, fn2, ...)
     local fn = exgnss[fn1] or exgnss[fn2]
@@ -62,6 +78,10 @@ local function is_fix()
     local ok, fixed = call_first("is_fix", "isFix")
     return ok and fixed == true
 end
+
+-- ---------------------------------------------------------------------------
+-- Raw GNSS read helpers
+-- ---------------------------------------------------------------------------
 
 local function read_rmc()
     local ok, rmc = pcall(exgnss.rmc, 2)
@@ -101,6 +121,10 @@ local function read_gga_quality()
         fix_quality = tonumber(gga.fix_quality) or 0
     }
 end
+
+-- ---------------------------------------------------------------------------
+-- Quality filter: only keep stable fixes
+-- ---------------------------------------------------------------------------
 
 local function refresh_location()
     local lat, lng = read_rmc()
@@ -148,6 +172,10 @@ local function refresh_location()
     save_location(lat, lng)
     return true
 end
+
+-- ---------------------------------------------------------------------------
+-- Setup / open helpers
+-- ---------------------------------------------------------------------------
 
 local function gnss_fix_callback()
     if refresh_location() then

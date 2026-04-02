@@ -2,6 +2,8 @@
 
 local M = {}
 
+-- Persistent runtime configuration stored in flash.
+-- Keep normalization simple so the rest of the project can read one shape only.
 local CONFIG_FILE = "/flash/net_config.json"
 local CONFIG_DIR = "/flash"
 local SERVER_COUNT = 2
@@ -48,6 +50,7 @@ local DEFAULT_CONFIG = {
 local g_config
 local busy = false
 
+-- Table / text helpers
 local function deepcopy(value)
     if type(value) ~= "table" then
         return value
@@ -78,6 +81,7 @@ local function to_bool(value)
     return value == true or value == 1 or value == "1" or value == "true" or value == "TRUE"
 end
 
+-- Config normalization helpers
 local function ensure_dir(dir)
     if io.dexist(dir) then
         return true
@@ -148,6 +152,7 @@ local function normalize(cfg)
     return normalized
 end
 
+-- Load on first use
 local function ensure_loaded()
     if g_config then
         return g_config
@@ -175,6 +180,7 @@ local function ensure_loaded()
     return g_config
 end
 
+-- Public read helpers
 function M.load()
     return ensure_loaded()
 end
@@ -238,6 +244,7 @@ function M.getSm4(cfg)
     return normalize_sm4(cfg and cfg.sm4, DEFAULT_CONFIG.sm4)
 end
 
+-- Public write helpers
 function M.setSm4(sm4)
     local cfg = deepcopy(ensure_loaded())
     cfg.sm4 = normalize_sm4(sm4, cfg.sm4 or DEFAULT_CONFIG.sm4)

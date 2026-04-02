@@ -8,21 +8,34 @@ local mqtt_topics = require("mqtt_topics")
 
 local M = {}
 
+-- ---------------------------------------------------------------------------
+-- UART1 / RS485 physical configuration
+-- ---------------------------------------------------------------------------
+
 local UART_ID = 1
 local UART_BAUD = 115200
 local UART_RXTX_PIN = 17
 local UART_RX_PIN_LEVEL = 0
 local UART_TXRX_DELAY_US = 1666
 
-local RX_BUFFER_SPLIT_THRESHOLD = 1024
+-- ---------------------------------------------------------------------------
+-- RX/TX queue sizing
+-- ---------------------------------------------------------------------------
+
 local RX_BUFFER_LIMIT = 4096
-local RX_IDLE_TIMEOUT_SEC = 1
+-- When the bus data stream has no line ending, split one frame after this
+-- many milliseconds of silence on UART RX.
+local RX_FORCE_FLUSH_LIMIT = 3072
+local RX_IDLE_TIMEOUT_MS = 30
 local RX_TASK_BATCH_SIZE = 8
 local FRAME_QUEUE_MAX_ITEMS = 128
 local FRAME_QUEUE_MAX_BYTES = 64 * 1024
 local TX_QUEUE_MAX_ITEMS = 64
 local TX_QUEUE_MAX_BYTES = 16 * 1024
-local ENABLE_UART_SEND_DEMO = false
+
+-- ---------------------------------------------------------------------------
+-- Shared BUSY-line arbitration
+-- ---------------------------------------------------------------------------
 
 local BUSY_DEC_GPIO_NUMBER = 24
 local BUSY_IO_GPIO_NUMBER = 98
@@ -37,6 +50,10 @@ local TX_SENT_TIMEOUT_MIN_MS = 200
 local TX_SENT_TIMEOUT_PER_BYTE_MS = 2
 local TX_SEND_RETRY_LIMIT = 3
 local TX_SEND_RETRY_BACKOFF_MS = 30
+
+-- ---------------------------------------------------------------------------
+-- MQTT control command
+-- ---------------------------------------------------------------------------
 
 -- MQTT server can send this command to write raw data to the RS485 bus.
 -- Topic: sys/{SN}/json/down/cmd
@@ -77,7 +94,7 @@ local tx_queue = bounded_queue.new({
 })
 local enabled_servers = flash_config.getEnabledServers()
 local last_warn_at = {}
-local last_rx_at = os.time()
+local last_rx_at = 0
 local bus_lock_held = false
 local tx_sent_seq = 0
 
@@ -85,6 +102,10 @@ uart_reliable_queue.init({
     device_sn = EPD_STATUS and EPD_STATUS.get_sn and EPD_STATUS.get_sn() or "NO_SN",
     target_servers = enabled_servers
 })
+
+-- ---------------------------------------------------------------------------
+-- Common small helpers
+-- ---------------------------------------------------------------------------
 
 local function warn_throttled(key, ...)
     local now = os.time()
@@ -94,6 +115,19 @@ local function warn_throttled(key, ...)
         log.warn(...)
     end
 end
+
+local function now_ms()
+    if mcu and type(mcu.ticks) == "function" and type(mcu.hz) == "function" then
+        local hz = tonumber(mcu.hz()) or 0
+        if hz > 0 then
+            return math.floor((tonumber(mcu.ticks()) or 0) * 1000 / hz)
+        end
+    end
+
+    return (tonumber(os.time()) or 0) * 1000
+end
+
+last_rx_at = now_ms()
 
 local function get_text(value, default)
     if type(value) ~= "string" then
@@ -131,6 +165,8 @@ local function get_report_topic()
     return mqtt_topics.get_up_resp_topic(get_device_sn())
 end
 
+-- MQTT1/MQTT2 both use the same response topic format, but bus control/report
+-- traffic is still only forwarded through MQTT1.
 local function publish_to_server(server_id, body)
     local target = tonumber(server_id)
     if not target or target < 1 or target > MQTT_SERVER_COUNT then
@@ -168,6 +204,10 @@ local function reply_send(server_id, request_id, result, reason, extra)
 
     publish_to_server(server_id, body)
 end
+
+-- ---------------------------------------------------------------------------
+-- Send-side state helpers
+-- ---------------------------------------------------------------------------
 
 -- Read current send path state.
 -- bus_busy:
@@ -255,6 +295,10 @@ local function normalize_frame(frame)
     return frame
 end
 
+-- ---------------------------------------------------------------------------
+-- RX frame queue
+-- ---------------------------------------------------------------------------
+
 local function push_frame(frame)
     frame = normalize_frame(frame)
     if not frame then
@@ -283,6 +327,10 @@ local function push_frame(frame)
     return true
 end
 
+-- ---------------------------------------------------------------------------
+-- TX queue
+-- ---------------------------------------------------------------------------
+
 local function push_tx(data)
     if type(data) ~= "string" or #data == 0 then
         return false, "empty_data"
@@ -309,6 +357,10 @@ local function push_tx(data)
 
     return true, "queued"
 end
+
+-- ---------------------------------------------------------------------------
+-- MQTT downlink -> UART bytes
+-- ---------------------------------------------------------------------------
 
 -- Convert server command payload into real UART bytes.
 -- encoding=text : send obj.data as-is
@@ -434,6 +486,10 @@ local function build_log_path(data)
     return string.format("/sd/log/%04d%02d%02d/%d.log", t.year, t.month, t.day, t.hour)
 end
 
+-- ---------------------------------------------------------------------------
+-- UART1 short JSON response -> MQTT1 up/resp
+-- ---------------------------------------------------------------------------
+
 -- STM32 on the UART1/485 bus can reply with a short JSON line such as:
 --   {"adress":1,"ok":1,"cmd":"freq"}
 --   {"adress":1,"ok":0,"cmd":"freq","err":1}
@@ -513,6 +569,10 @@ local function forward_uart1_bus_response(frame)
     return true
 end
 
+-- ---------------------------------------------------------------------------
+-- Raw UART receive callback
+-- ---------------------------------------------------------------------------
+
 local function uart_rx_cb(id)
     while true do
         local data = uart.read(id, 1024)
@@ -521,7 +581,7 @@ local function uart_rx_cb(id)
         end
 
         rx_buf = rx_buf .. data
-        last_rx_at = os.time()
+        last_rx_at = now_ms()
         if #rx_buf > RX_BUFFER_LIMIT then
             rx_buf = rx_buf:sub(#rx_buf - RX_BUFFER_LIMIT + 1)
             warn_throttled("uart_rx_trim", "UART", "rx buffer trimmed to", #rx_buf)
@@ -537,25 +597,102 @@ end
 uart.on(UART_ID, "receive", uart_rx_cb)
 uart.on(UART_ID, "sent", uart_tx_sent_cb)
 
+local function pop_line_frame()
+    local crlf_pos = rx_buf:find("\r\n", 1, true)
+    local lf_pos = rx_buf:find("\n", 1, true)
+    local pos
+    local sep_len = 0
+
+    if crlf_pos and lf_pos then
+        if crlf_pos <= lf_pos then
+            pos = crlf_pos
+            sep_len = 2
+        else
+            pos = lf_pos
+            sep_len = 1
+        end
+    elseif crlf_pos then
+        pos = crlf_pos
+        sep_len = 2
+    elseif lf_pos then
+        pos = lf_pos
+        sep_len = 1
+    end
+
+    if not pos then
+        return false
+    end
+
+    push_frame(rx_buf:sub(1, pos - 1))
+    rx_buf = rx_buf:sub(pos + sep_len)
+    return true
+end
+
+local function flush_rx_buffer_if_needed()
+    if #rx_buf == 0 then
+        return false
+    end
+
+    local now = now_ms()
+    if #rx_buf >= RX_FORCE_FLUSH_LIMIT then
+        warn_throttled("uart_rx_force_flush", "UART", "force flush by size", #rx_buf)
+        push_frame(rx_buf)
+        rx_buf = ""
+        return true
+    end
+
+    if (now - last_rx_at) >= RX_IDLE_TIMEOUT_MS then
+        push_frame(rx_buf)
+        rx_buf = ""
+        return true
+    end
+
+    return false
+end
+
+-- ---------------------------------------------------------------------------
+-- RX split task: convert raw UART stream into frame_queue items
+-- ---------------------------------------------------------------------------
+
 sys.taskInit(function()
     while true do
-        local pos = rx_buf:find("\r\n", 1, true)
-        if pos then
-            push_frame(rx_buf:sub(1, pos - 1))
-            rx_buf = rx_buf:sub(pos + 2)
-        else
-            if #rx_buf > 0 then
-                local now = os.time()
-                if #rx_buf > RX_BUFFER_SPLIT_THRESHOLD or (now - last_rx_at) > RX_IDLE_TIMEOUT_SEC then
-                    push_frame(rx_buf)
-                    rx_buf = ""
-                end
-            end
+        local processed = false
 
-            sys.wait(5)
+        while pop_line_frame() do
+            processed = true
         end
+
+        if not processed then
+            processed = flush_rx_buffer_if_needed()
+        end
+
+        sys.wait(processed and 1 or 5)
     end
 end)
+
+local function queue_frame_to_existing_upload_path(frame)
+    local ok, reason = uart_reliable_queue.enqueue_frame(frame)
+    if not ok then
+        warn_throttled("uart_reliable_fail", "UART", "reliable enqueue failed", reason or "unknown")
+    end
+
+    local path = build_log_path(frame)
+    if path then
+        sys.publish("SD_WRITE", path, frame)
+    end
+end
+
+local function handle_rx_frame(frame)
+    if forward_uart1_bus_response(frame) then
+        return
+    end
+
+    queue_frame_to_existing_upload_path(frame)
+end
+
+-- ---------------------------------------------------------------------------
+-- RX process task: consume frame_queue and dispatch each frame
+-- ---------------------------------------------------------------------------
 
 sys.taskInit(function()
     while true do
@@ -567,17 +704,7 @@ sys.taskInit(function()
                 break
             end
 
-            if not forward_uart1_bus_response(frame) then
-                local ok, reason = uart_reliable_queue.enqueue_frame(frame)
-                if not ok then
-                    warn_throttled("uart_reliable_fail", "UART", "reliable enqueue failed", reason or "unknown")
-                end
-
-                local path = build_log_path(frame)
-                if path then
-                    sys.publish("SD_WRITE", path, frame)
-                end
-            end
+            handle_rx_frame(frame)
 
             processed = processed + 1
         end
@@ -589,6 +716,10 @@ sys.taskInit(function()
         end
     end
 end)
+
+-- ---------------------------------------------------------------------------
+-- TX task: lock the shared bus, write UART bytes, wait for sent callback
+-- ---------------------------------------------------------------------------
 
 sys.taskInit(function()
     local pending_data
@@ -726,15 +857,6 @@ function M.handle_command(server_id, obj)
         tx_queue_bytes = tx_queue:used_bytes()
     })
     return true
-end
-
-if ENABLE_UART_SEND_DEMO then
-    sys.taskInit(function()
-        while true do
-            sys.wait(1000)
-            sys.publish("UART_SEND", "test data.\r\n")
-        end
-    end)
 end
 
 return M

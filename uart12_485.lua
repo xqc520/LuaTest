@@ -2,6 +2,7 @@
 
 local M = {}
 
+-- Simple UART12 RS485 test port with hardware direction control.
 local UART_ID = 12
 local UART_BAUD = 9600
 local UART_BUFFER_SIZE = 1024
@@ -13,6 +14,7 @@ local ENABLE_TEST_SEND = true
 local TEST_SEND_INTERVAL_MS = 1000
 local TEST_SEND_DATA = "test data.\r\n"
 
+-- Normalize everything to string before writing.
 local function normalize_send_data(data)
     if type(data) == "string" then
         return data
@@ -25,6 +27,7 @@ local function normalize_send_data(data)
     return tostring(data)
 end
 
+-- Public/local send entry used by both sys.publish and M.send.
 local function send_data(data)
     data = normalize_send_data(data)
     if not data or data == "" then
@@ -39,6 +42,7 @@ local function uart_send_cb(id)
    -- log.info("uart12_485", id, "数据发送完成回调")
 end
 
+-- Read all buffered bytes and publish them as one chunk.
 local function uart_cb(id, len)
     local s = ""
     repeat

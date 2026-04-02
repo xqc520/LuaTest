@@ -6,6 +6,8 @@ local mqtt_topics = require("mqtt_topics")
 
 local M = {}
 
+-- RTC in this project does not use public NTP.
+-- Time is requested from the primary MQTT server only.
 local DEFAULT_TIMEZONE = "+08:00"
 local REQUEST_INTERVAL_SEC = 15
 local VALID_TIME_MIN = 1700000000
@@ -18,6 +20,7 @@ local request_state = {
     online = { false, false }
 }
 
+-- Small value helpers
 local function get_text(value, default)
     if type(value) ~= "string" then
         return default or ""
@@ -39,6 +42,7 @@ local function get_number(value, default)
     return n
 end
 
+-- Topic / identity helpers
 local function get_device_sn()
     return mqtt_topics.get_device_sn("NO_SN")
 end
@@ -51,6 +55,7 @@ local function get_time_sync_topic()
     return mqtt_topics.get_down_resp_topic(get_device_sn())
 end
 
+-- MQTT publish wrapper used by request/reply flows
 local function publish_to_server(server_id, body)
     local target = tonumber(server_id)
     if target ~= PRIMARY_MQTT_SERVER_ID then
@@ -66,6 +71,7 @@ local function publish_to_server(server_id, body)
     return true
 end
 
+-- Timezone / RTC write helpers
 local function parse_timezone(text)
     local tz = get_text(text, DEFAULT_TIMEZONE)
     local sign, hour, minute = tz:match("^([%+%-])(%d%d):(%d%d)$")
@@ -140,6 +146,7 @@ local function set_rtc_from_server_time(server_time, timezone_text)
     }
 end
 
+-- Runtime state helpers
 local function is_time_valid()
     local now = os.time()
     return type(now) == "number" and now >= VALID_TIME_MIN
@@ -164,6 +171,7 @@ local function reply(server_id, request_id, result, reason, extra)
     publish_to_server(server_id, body)
 end
 
+-- Time request helpers
 local function request_time(server_id, force)
     local now = os.time()
     local last_request_at = request_state.last_request_at[server_id] or 0
@@ -200,6 +208,7 @@ local function request_time_from_online_server(force, reason)
     return request_time(server_id, force == true)
 end
 
+-- Public API
 function M.request_now(server_id, force)
     return request_time(server_id, force == true)
 end
@@ -249,6 +258,7 @@ function M.handle_command(server_id, topic, obj)
     return true
 end
 
+-- MQTT connection event -> trigger first time request
 local function make_conn_handler(server_id)
     return function(online)
         request_state.online[server_id] = online == true
@@ -268,6 +278,9 @@ end
 
 sys.subscribe("MQTT1_CONN_EVENT", make_conn_handler(PRIMARY_MQTT_SERVER_ID))
 
+-- Periodic maintenance loop:
+-- invalid time -> retry frequently
+-- valid time   -> sync once per day
 sys.taskInit(function()
     while true do
         if is_time_valid() then

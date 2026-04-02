@@ -11,6 +11,10 @@ local mqtt_topics = require("mqtt_topics")
 
 local M = {}
 
+-- Persistent queue stored on SD card. It is shared by:
+-- 1. UART1/485 normal upload path
+-- 2. 10-minute device status report path
+-- 3. Manual backfill command path
 local BASE_DIR = "/sd/reliable_uart"
 local RECORD_DIR = BASE_DIR .. "/records"
 local META_FILE = BASE_DIR .. "/meta.json"
@@ -39,6 +43,7 @@ local state = {
 local load_meta
 local last_encrypt_error_at = 0
 
+-- Basic type / text helpers
 local function get_text(value, default)
     if type(value) ~= "string" then
         return default or ""
@@ -117,6 +122,7 @@ local function ensure_dir(path)
     return io.mkdir(path) == true or io.dexist(path)
 end
 
+-- SD file read / write / remove helpers
 local function read_file(path)
     if not sd.init() then
         log.error("reliable_uart", "sd init failed before read", path)
@@ -258,6 +264,7 @@ local function save_meta()
     })
 end
 
+-- Storage bootstrap
 local function ensure_storage_ready()
     if state.ready then
         return true
@@ -293,6 +300,7 @@ function load_meta()
     return true
 end
 
+-- Per-server bitmask helpers
 local function bit_for_server(server_id)
     return bit32.lshift(1, server_id - 1)
 end
@@ -368,6 +376,7 @@ local function resolve_target_mask(opts)
     return state.target_mask
 end
 
+-- Record build / load / save helpers
 local function build_payload_record(frame, seq, opts)
     opts = type(opts) == "table" and opts or {}
 
@@ -435,6 +444,7 @@ local function cleanup_head()
     end
 end
 
+-- MQTT publish / reply helpers
 local function get_report_topic()
     return mqtt_topics.get_up_resp_topic(state.device_sn)
 end
@@ -477,6 +487,7 @@ local function reply_backfill(server_id, request_id, result, reason, extra)
     publish_body(server_id, body)
 end
 
+-- Historical log scan helpers used by backfill
 local function hour_floor(ts)
     local n = math.floor(tonumber(ts) or 0)
     return n - (n % 3600)
@@ -630,6 +641,7 @@ local function process_backfill_request(req)
     })
 end
 
+-- Inflight publish state and queue pump helpers
 local function clear_inflight(server_id)
     state.inflight[server_id] = nil
 end
@@ -754,6 +766,7 @@ local function pump_all()
     end
 end
 
+-- Public queue API
 function M.init(opts)
     opts = type(opts) == "table" and opts or {}
     state.device_sn = sanitize_sn(opts.device_sn)
@@ -866,6 +879,7 @@ function M.handle_command(server_id, obj)
     return true
 end
 
+-- MQTT online/offline state hooks
 local function make_conn_handler(server_id)
     return function(online)
         state.online[server_id] = online == true

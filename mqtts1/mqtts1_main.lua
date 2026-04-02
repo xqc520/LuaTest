@@ -7,6 +7,8 @@ local error_logger = require("error_logger")
 local mqtt_topics = require("mqtt_topics")
 local mqtt_tls = require("mqtt_tls")
 
+-- MQTT1 is the primary control channel in this project.
+-- Time sync, OTA, SM4 command flow and downlink commands all use this server.
 local cfg = flash_config.get()
 local srv = cfg.servers[1] or {}
 local DEVICE_SN = EPD_STATUS and EPD_STATUS.get_sn and EPD_STATUS.get_sn() or "NO_SN"
@@ -21,6 +23,7 @@ local SUBSCRIBE_TOPICS = ota_manager.get_subscribe_topics()
 SUBSCRIBE_TOPICS[mqtt_topics.get_down_cmd_topic(DEVICE_SN)] = 2
 SUBSCRIBE_TOPICS[mqtt_topics.get_down_resp_topic(DEVICE_SN)] = 2
 
+-- MQTT callback -> convert raw client events into task messages
 local function mqtts_client_event_cbfunc(mqtt_client, event, data, payload, metas)
     log.info("mqtt1.event", event, data, payload, json.encode(metas))
 
@@ -50,6 +53,7 @@ local function mqtts_client_event_cbfunc(mqtt_client, event, data, payload, meta
     end
 end
 
+-- Wait until the default network adapter is ready
 local function wait_for_ip_ready()
     while not socket.adapter(socket.dft()) do
         log.warn("mqtt1.main", "wait IP_READY", socket.dft())
@@ -57,6 +61,7 @@ local function wait_for_ip_ready()
     end
 end
 
+-- Create one TLS MQTT client using the current saved config
 local function create_client()
     if not mqtt_tls.is_time_valid() then
         error_logger.error("mqtt1.main", "rtc invalid, mqtt tls ca verify requires valid time")
@@ -97,6 +102,7 @@ local function create_client()
     return mqtt_client
 end
 
+-- Simple connect/reconnect loop
 local function mqtts_client_main_task_func()
     while true do
         wait_for_ip_ready()

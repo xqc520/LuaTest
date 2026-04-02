@@ -5,6 +5,7 @@ local mqtt_topics = require("mqtt_topics")
 
 local M = {}
 
+-- GPIO16 controls the external sensor 12V power switch.
 local SENSOR_POWER_EN_GPIO = 16
 local SENSOR_POWER_ON_LEVEL = 1
 local SENSOR_POWER_OFF_LEVEL = 0
@@ -19,6 +20,7 @@ local state = {
     timer_seq = 0
 }
 
+-- Small helpers
 local function get_text(value, default)
     if type(value) ~= "string" then
         return default or ""
@@ -40,6 +42,7 @@ local function get_report_topic()
     return mqtt_topics.get_up_resp_topic(get_device_sn())
 end
 
+-- GPIO init / apply helpers
 local function ensure_gpio_ready()
     if state.inited then
         return true
@@ -69,6 +72,7 @@ local function apply_state(enable, source)
     return true, state.enabled and "on" or "off"
 end
 
+-- Optional auto-off timer
 local function schedule_auto_off(duration_ms, source)
     local duration = math.floor(tonumber(duration_ms) or 0)
     if duration <= 0 then
@@ -86,6 +90,7 @@ local function schedule_auto_off(duration_ms, source)
     end, duration)
 end
 
+-- MQTT reply helper
 local function publish_to_server(server_id, body)
     local target = tonumber(server_id)
     if not target or target < 1 or target > MQTT_SERVER_COUNT then
@@ -154,6 +159,7 @@ local function normalize_enable(obj)
     return nil
 end
 
+-- Public API
 function M.is_on()
     return state.enabled == true
 end

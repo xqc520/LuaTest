@@ -5,6 +5,8 @@ local mqtts_sender = require("mqtts2_sender")
 local error_logger = require("error_logger")
 local mqtt_tls = require("mqtt_tls")
 
+-- MQTT2 is a secondary upload channel.
+-- It keeps the same reconnect logic as MQTT1, but does not own the main control flow.
 local cfg = flash_config.get()
 local srv = cfg.servers[2] or {}
 
@@ -15,6 +17,7 @@ local USERNAME = srv.user or "admin"
 local PASSWORD = srv.pass or "123456"
 local TASK_NAME = mqtts_sender.TASK_NAME_PREFIX .. "main"
 
+-- MQTT callback -> convert raw client events into task messages
 local function mqtts_client_event_cbfunc(mqtt_client, event, data, payload, metas)
     log.info("mqtt2.event", event, data, payload, json.encode(metas))
 
@@ -41,6 +44,7 @@ local function mqtts_client_event_cbfunc(mqtt_client, event, data, payload, meta
     end
 end
 
+-- Wait until the default network adapter is ready
 local function wait_for_ip_ready()
     while not socket.adapter(socket.dft()) do
         log.warn("mqtt2.main", "wait IP_READY", socket.dft())
@@ -48,6 +52,7 @@ local function wait_for_ip_ready()
     end
 end
 
+-- Create one TLS MQTT client using the current saved config
 local function create_client()
     if not mqtt_tls.is_time_valid() then
         error_logger.error("mqtt2.main", "rtc invalid, mqtt tls ca verify requires valid time")
@@ -88,6 +93,7 @@ local function create_client()
     return mqtt_client
 end
 
+-- Simple connect/reconnect loop
 local function mqtts_client_main_task_func()
     while true do
         wait_for_ip_ready()
