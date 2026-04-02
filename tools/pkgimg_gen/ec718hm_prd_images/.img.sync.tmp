@@ -1,0 +1,15 @@
+2026-03-20 16:44:10
+ImageInfo:C:\Users\20200016\Desktop\AIAgent\LuaTest\tools\firmware\imagedata.json
+ExtractDir:C:\Users\20200016\Desktop\AIAgent\LuaTest\tools\firmware\pkg_extract_tmp
+SYNC SRC: C:\Users\20200016\Desktop\AIAgent\LuaTest\tools\firmware\pkg_extract_tmp\ap_bootloader.bin
+SYNC TGT: C:\Users\20200016\Desktop\AIAgent\LuaTest\tools\pkgimg_gen\ec718hm_prd_images\ap_bootloader.bin
+2026-03-20 16:44:10
+ImageInfo:C:\Users\20200016\Desktop\AIAgent\LuaTest\tools\firmware\imagedata.json
+ExtractDir:C:\Users\20200016\Desktop\AIAgent\LuaTest\tools\firmware\pkg_extract_tmp
+SYNC SRC: C:\Users\20200016\Desktop\AIAgent\LuaTest\tools\firmware\pkg_extract_tmp\ap.bin
+SYNC TGT: C:\Users\20200016\Desktop\AIAgent\LuaTest\tools\pkgimg_gen\ec718hm_prd_images\ap.bin
+2026-03-20 16:44:10
+ImageInfo:C:\Users\20200016\Desktop\AIAgent\LuaTest\tools\firmware\imagedata.json
+ExtractDir:C:\Users\20200016\Desktop\AIAgent\LuaTest\tools\firmware\pkg_extract_tmp
+SYNC SRC: C:\Users\20200016\Desktop\AIAgent\LuaTest\tools\firmware\pkg_extract_tmp\cp-demo-flash.bin
+SYNC TGT: C:\Users\20200016\Desktop\AIAgent\LuaTest\tools\pkgimg_gen\ec718hm_prd_images\cp-demo-flash.bin

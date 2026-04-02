@@ -1,0 +1,71 @@
+---@diagnostic disable: undefined-global
+
+local mqtt_sender_queue = require("mqtt_sender_queue")
+
+local mqtts_sender = {}
+local send_queue = mqtt_sender_queue.new("mqtts_3_send_queue")
+
+mqtts_sender.TASK_NAME_PREFIX = "mqtts_3"
+mqtts_sender.TASK_NAME = mqtts_sender.TASK_NAME_PREFIX .. "sender"
+
+local function send_data_req_proc_func(tag, topic, payload, qos, cb)
+    local ok, reason, dropped = mqtt_sender_queue.enqueue(send_queue, {
+        topic = topic,
+        payload = payload,
+        qos = qos or 0,
+        cb = cb
+    })
+
+    if dropped and dropped > 0 then
+        log.warn("mqtts3_sender", "queue overflow, dropped", dropped, "remain", send_queue:length(), "bytes", send_queue:used_bytes())
+    end
+
+    if not ok then
+        log.warn("mqtts3_sender", "drop payload", reason, topic, payload and #payload or 0)
+        return
+    end
+
+    sys.sendMsg(mqtts_sender.TASK_NAME, "MQTT_EVENT", "PUBLISH_REQ")
+end
+
+local function publish_item(mqtt_client)
+    return mqtt_sender_queue.publish_next(send_queue, mqtt_client)
+end
+
+local function publish_item_cbfunc(item, result)
+    mqtt_sender_queue.notify(item, result)
+end
+
+local function mqtts_client_sender_task_func()
+    local mqtt_client
+    local send_item
+
+    while true do
+        local msg = sys.waitMsg(mqtts_sender.TASK_NAME, "MQTT_EVENT")
+
+        if msg[2] == "CONNECT_OK" then
+            mqtt_client = msg[3]
+            send_item = publish_item(mqtt_client)
+            sys.publish("MQTT3_CONN_EVENT", true)
+        elseif msg[2] == "PUBLISH_REQ" then
+            if mqtt_client and not send_item then
+                send_item = publish_item(mqtt_client)
+            end
+        elseif msg[2] == "PUBLISH_OK" then
+            publish_item_cbfunc(send_item, true)
+            sys.publish("FEED_NETWORK_WATCHDOG")
+            send_item = publish_item(mqtt_client)
+        elseif msg[2] == "DISCONNECTED" then
+            mqtt_client = nil
+            publish_item_cbfunc(send_item, false)
+            mqtt_sender_queue.clear(send_queue)
+            send_item = nil
+            sys.publish("MQTT3_CONN_EVENT", false)
+        end
+    end
+end
+
+sys.subscribe("mqtt3_send_data_req", send_data_req_proc_func)
+sys.taskInitEx(mqtts_client_sender_task_func, mqtts_sender.TASK_NAME)
+
+return mqtts_sender
