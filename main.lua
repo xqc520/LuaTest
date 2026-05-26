@@ -13,6 +13,14 @@ local ENABLE_FIELD_DEBUG_LOG = true
 local FIELD_DEBUG_INTERVAL_MS = 5000
 local PRIMARY_MQTT_SERVER_ID = 1
 
+
+
+
+
+
+
+
+
 -- Basic hardware defaults that should be ready before the rest of the project starts.
 gpio.setup(141, 1, gpio.PULLUP)
 log.info("main", "project", PROJECT, "version", VERSION)
@@ -107,6 +115,20 @@ local function get_server_status_text()
         server_status[1] or "-",
         server_status[2] or "-"
     )
+end
+
+local function preview_payload(payload, max_len)
+    if type(payload) ~= "string" then
+        return tostring(payload)
+    end
+
+    local text = payload:gsub("[\r\n]+", " ")
+    local limit = tonumber(max_len) or 240
+    if #text <= limit then
+        return text
+    end
+
+    return text:sub(1, limit) .. "..."
 end
 
 -- Field log is the single summary line used during outdoor maintenance.
@@ -337,6 +359,8 @@ if boot_should_start_network then
             return
         end
 
+        log.info("mqtt.rx", "server=" .. tostring(server_id), "topic=" .. tostring(topic), preview_payload(payload, 240))
+
         if ota_manager.handle_message(server_id, topic, payload) then
             return
         end
@@ -345,8 +369,6 @@ if boot_should_start_network then
             return
         end
 
-        log.info("mqtt", "down cmd", server_id, payload)
-
         local obj, err = json_codec.decode(payload or "")
         if not obj then
             error_logger.error("mqtt", err)
@@ -354,9 +376,11 @@ if boot_should_start_network then
         end
 
         local cmd = json_codec.get(obj, "cmd", "")
-        log.info("mqtt", "cmd", cmd)
+        log.info("mqtt.rx", "cmd=" .. tostring(cmd), "request_id=" .. tostring(obj.request_id or ""))
 
-        dispatch_primary_server_command(server_id, topic, obj)
+        if not dispatch_primary_server_command(server_id, topic, obj) then
+            log.warn("mqtt.rx", "unhandled", "topic=" .. tostring(topic), "cmd=" .. tostring(cmd))
+        end
     end
 
     sys.subscribe("RECV_DATA_FROM_MQTTS1_SERVER", function(prefix, topic, payload)
@@ -379,5 +403,6 @@ if boot_should_start_network then
 else
     log.warn("boot", "skip 4G/MQTT/network watchdog until config is complete")
 end
+
 
 sys.run()

@@ -31,7 +31,36 @@ local PROBE_URIS = {
     ["/fwlink/"] = true
 }
 
+local function get_text(value, default)
+    if type(value) ~= "string" then
+        return default or ""
+    end
+
+    local trimmed = value:gsub("^%s+", ""):gsub("%s+$", "")
+    if trimmed == "" then
+        return default or ""
+    end
+
+    return trimmed
+end
+
+local function get_device_sn()
+    local cfg = g_config or flash_config.get()
+    local sn = get_text(cfg and cfg.device and cfg.device.sn, "")
+    if sn == "" then
+        return ""
+    end
+
+    -- Avoid unsafe separators in SSID text.
+    return sn:gsub("[/%s]+", "_")
+end
+
 local function get_ap_ssid()
+    local sn = get_device_sn()
+    if sn ~= "" then
+        return AP_SSID_PREFIX .. sn
+    end
+
     local imei = ""
     if mobile and mobile.imei then
         local ok, value = pcall(mobile.imei)

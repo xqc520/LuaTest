@@ -125,6 +125,7 @@ end
 -- SD file read / write / remove helpers
 local function read_file(path)
     if not sd.init() then
+        sd.mark_fault("reliable_uart_read_init_failed")
         log.error("reliable_uart", "sd init failed before read", path)
         return nil
     end
@@ -159,6 +160,7 @@ end
 
 local function write_file(path, content)
     if not sd.init() then
+        sd.mark_fault("reliable_uart_write_init_failed")
         log.error("reliable_uart", "sd init failed before write", path)
         return false
     end
@@ -187,6 +189,7 @@ end
 
 local function remove_file(path)
     if not sd.init() then
+        sd.mark_fault("reliable_uart_remove_init_failed")
         log.error("reliable_uart", "sd init failed before remove", path)
         return false
     end

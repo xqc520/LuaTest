@@ -705,6 +705,14 @@ local function publish_to_server(server_id, body)
         return false
     end
 
+    log.info(
+        "metrics.tx",
+        "cmd=" .. tostring(body.cmd or ""),
+        "request_id=" .. tostring(body.request_id or ""),
+        "result=" .. tostring(body.result or ""),
+        "reason=" .. tostring(body.reason or ""),
+        "topic=" .. mqtt_topics.get_up_resp_topic(get_device_sn())
+    )
     sys.publish("mqtt" .. target .. "_send_data_req", "device_metrics", mqtt_topics.get_up_resp_topic(get_device_sn()), payload, 1)
     return true
 end
@@ -882,6 +890,7 @@ function M.handle_command(server_id, obj)
     end
 
     local cmd = get_text(obj.cmd, "")
+    log.info("metrics.rx", "cmd=" .. tostring(cmd), "request_id=" .. tostring(obj.request_id or ""))
 
     if cmd == SIM_INFO_CMD then
         local request_id = get_text(obj.request_id, "sim-" .. tostring(os.time()))

@@ -743,3 +743,364 @@ bus_send
 - `v`：参数值
 - 如果还要加别的参数，也可以继续放在同一层，设备会一起带到总线 JSON 里
 - 如果服务器仍然想完全自己控制原始报文，也可以继续使用原来的 `data + encoding` 方式
+## 13. BUS 设备配置下发（以本节为准）
+
+如果服务器要通过设备去配置总线上的传感器，推荐直接使用 `Server` 嵌套 JSON。
+
+下发 Topic：
+```text
+sys/{SN}/json/down/cmd
+```
+
+命令字：
+```text
+bus_send
+```
+
+### 13.1 修改上传频率
+
+服务器下发：
+
+```json
+{
+  "cmd": "bus_send",
+  "request_id": "bus-set-freq-001",
+  "Server": {
+    "SN": "001265CE",
+    "sensorAddr": 33554945,
+    "sensorName": "XT_278",
+    "sendFrequency": 1
+  }
+}
+```
+
+说明：
+- 这条命令表示修改总线设备 `XT_278`
+- 目标地址是 `33554945`
+- 上传频率改为 `1`
+
+设备实际发到 BUS/485 的内容：
+
+```json
+{"Server":{"SN":"001265CE","sensorAddr":33554945,"sensorName":"XT_278","sendFrequency":1}}
+```
+
+设备会自动追加 `\r\n` 后发到总线。
+
+### 13.2 设置开关状态
+
+服务器下发：
+
+```json
+{
+  "cmd": "bus_send",
+  "request_id": "bus-set-status-001",
+  "Server": {
+    "SN": "001265CE",
+    "sensorAddr": 33554945,
+    "sensorName": "XT_278",
+    "status": 0
+  }
+}
+```
+
+说明：
+- `status=0` 表示关闭
+- 如果设备协议定义 `1` 为打开、`0` 为关闭，服务器就按这个传
+
+设备实际发到 BUS/485 的内容：
+
+```json
+{"Server":{"SN":"001265CE","sensorAddr":33554945,"sensorName":"XT_278","status":0}}
+```
+
+设备会自动追加 `\r\n` 后发到总线。
+
+### 13.3 回包说明
+
+如果设备已经成功进入 UART1 发送队列，会回：
+
+```json
+{
+  "cmd": "bus_send",
+  "request_id": "bus-set-freq-001",
+  "result": 0,
+  "reason": "queued",
+  "sn": "123456789",
+  "time": 1775110200,
+  "u_cmd": "sendFrequency"
+}
+```
+
+如果当前总线忙，但允许排队，可能回：
+
+```json
+{
+  "cmd": "bus_send",
+  "request_id": "bus-set-status-001",
+  "result": 0,
+  "reason": "queued_busy",
+  "sn": "123456789",
+  "time": 1775110201,
+  "u_cmd": "status"
+}
+```
+
+如果服务器要求总线必须完全空闲才允许发，并且当前总线正忙，会回：
+
+```json
+{
+  "cmd": "bus_send",
+  "request_id": "bus-set-status-001",
+  "result": -1,
+  "reason": "bus_busy",
+  "sn": "123456789",
+  "time": 1775110202,
+  "u_cmd": "status"
+}
+```
+
+### 13.4 兼容说明
+
+- 这一节是服务器对接总线设备配置的推荐格式
+- 推荐优先使用 `Server` 嵌套 JSON
+- 设备仍然保留原来的 `data + encoding=text/hex` 透传方式
+- 如果后面还要增加别的总线配置项，也建议继续放在 `Server` 对象里
+
+## OTA 对接补充（2026-04-03 版，以本节为准）
+
+下面这节是当前 OTA 的最新对接说明，优先级高于前面的旧描述。
+
+### OTA Topic
+
+下发 Topic：
+
+```text
+sys/{SN}/ota/down/update
+```
+
+状态回包 Topic：
+
+```text
+sys/{SN}/ota/up/resport
+```
+
+说明：
+
+- `resport` 是当前项目代码中的实际 Topic 名称，服务器请按这个值订阅。
+- MQTT2 不参与 OTA。
+
+### 推荐下发 JSON
+
+```json
+{
+  "request_id": "ota-20260403-001",
+  "url": "http://example.com/ota/firmware.bin",
+  "version": "1.0.3",
+  "force": false,
+  "timeout": 300000,
+  "md5": "d41d8cd98f00b204e9800998ecf8427e"
+}
+```
+
+字段说明：
+
+- `request_id`：请求编号，建议唯一
+- `url`：升级包地址，必填
+- `version`：目标版本，可选
+- `force`：是否强制升级，可选
+- `timeout`：下载超时毫秒数，可选
+- `md5`：升级包文件的 MD5，可选；如果填写，设备会先做真校验
+
+### 不带 md5 的流程
+
+1. 设备收到 OTA 消息
+2. 校验 payload 和 `url`
+3. 如果填写了 `version` 且 `force=false`，先比较版本
+4. 回 `start`
+5. 正式执行 OTA
+6. 成功回 `success`
+7. 失败回 `failed`
+
+### 带 md5 的流程
+
+1. 设备收到 OTA 消息
+2. 校验 payload 和 `url`
+3. 如果填写了 `version` 且 `force=false`，先比较版本
+4. 回 `verify_start`
+5. 临时下载升级包到本地文件
+6. 用 `crypto.md_file("MD5", path)` 计算文件 MD5
+7. 一致则回 `verify_ok`
+8. 然后回 `start`
+9. 正式执行 OTA
+10. 成功回 `success`
+11. 校验失败回 `verify_failed`
+12. 正式 OTA 失败回 `failed`
+
+说明：
+
+- 当前 `md5` 是真校验，不是只检查字段。
+- 因为 `libfota2` 不会把正式下载的文件路径回给 Lua，所以设备会先临时下载一份做校验，再正式升级一次。
+- 这意味着带 `md5` 时，服务器侧会被下载两次升级包。
+
+### OTA 回包状态
+
+常见状态如下：
+
+- `invalid_payload`
+- `already_latest`
+- `duplicate`
+- `busy`
+- `verify_start`
+- `verify_ok`
+- `verify_failed`
+- `start`
+- `success`
+- `failed`
+
+### 回包示例
+
+MD5 校验通过：
+
+```json
+{
+  "request_id": "ota-20260403-001",
+  "status": "verify_ok",
+  "message": "ota md5 verify ok",
+  "sn": "123456789",
+  "imei": "864793080300333",
+  "project": "LuaTest",
+  "version": "1.0.2",
+  "firmware": "LuaTest-1.0.2",
+  "core_version": "LuatOS-SoC_xxx",
+  "target_version": "1.0.3",
+  "url": "###http://example.com/ota/firmware.bin",
+  "md5": "d41d8cd98f00b204e9800998ecf8427e",
+  "source_server": 1,
+  "source_topic": "sys/123456789/ota/down/update",
+  "result_code": null,
+  "time": 1775188800
+}
+```
+
+MD5 校验失败：
+
+```json
+{
+  "request_id": "ota-20260403-002",
+  "status": "verify_failed",
+  "message": "md5 mismatch expected=... actual=...",
+  "sn": "123456789",
+  "result_code": -2,
+  "time": 1775188810
+}
+```
+
+OTA 成功：
+
+```json
+{
+  "request_id": "ota-20260403-003",
+  "status": "success",
+  "message": "upgrade package downloaded",
+  "sn": "123456789",
+  "result_code": 0,
+  "time": 1775188820
+}
+```
+
+### mosquitto 示例
+
+下发 OTA：
+
+```bash
+mosquitto_pub -h 127.0.0.1 -p 8883 --cafile rootCA.crt -u admin -P 123456 -t "sys/123456789/ota/down/update" -m "{\"request_id\":\"ota-20260403-001\",\"url\":\"http://example.com/ota/firmware.bin\",\"version\":\"1.0.3\",\"force\":false,\"timeout\":300000,\"md5\":\"d41d8cd98f00b204e9800998ecf8427e\"}"
+```
+
+订阅 OTA 回包：
+
+```bash
+mosquitto_sub -h 127.0.0.1 -p 8883 --cafile rootCA.crt -u admin -P 123456 -t "sys/+/ota/up/resport" -v
+```
+
+## OTA 简化对接（最终以本节为准）
+
+如果服务器只想要最简单的 OTA 对接，请只记这几项。
+
+### Topic
+
+下发：
+
+```text
+sys/{SN}/ota/down/update
+```
+
+回包：
+
+```text
+sys/{SN}/ota/up/resport
+```
+
+### 推荐下发 JSON
+
+```json
+{
+  "request_id": "ota-001",
+  "url": "http://example.com/ota/firmware.bin",
+  "md5": "d41d8cd98f00b204e9800998ecf8427e"
+}
+```
+
+只需要这 3 个字段：
+
+- `request_id`
+- `url`
+- `md5`（可选）
+
+如果不做 MD5 校验：
+
+```json
+{
+  "request_id": "ota-001",
+  "url": "http://example.com/ota/firmware.bin"
+}
+```
+
+### 设备回包
+
+设备回包只保留最少字段：
+
+```json
+{
+  "request_id": "ota-001",
+  "status": "success",
+  "message": "upgrade package downloaded",
+  "sn": "123456789",
+  "time": 1775188800
+}
+```
+
+失败时可能带 `result_code`：
+
+```json
+{
+  "request_id": "ota-001",
+  "status": "failed",
+  "message": "package download failed",
+  "sn": "123456789",
+  "time": 1775188810,
+  "result_code": 4
+}
+```
+
+### 常见状态
+
+- `invalid_payload`
+- `duplicate`
+- `busy`
+- `verify_start`
+- `verify_ok`
+- `verify_failed`
+- `start`
+- `success`
+- `failed`

@@ -26,7 +26,7 @@ local RX_BUFFER_LIMIT = 4096
 -- When the bus data stream has no line ending, split one frame after this
 -- many milliseconds of silence on UART RX.
 local RX_FORCE_FLUSH_LIMIT = 3072
-local RX_IDLE_TIMEOUT_MS = 30
+local RX_IDLE_TIMEOUT_MS = 15
 local RX_TASK_BATCH_SIZE = 8
 local FRAME_QUEUE_MAX_ITEMS = 128
 local FRAME_QUEUE_MAX_BYTES = 64 * 1024
@@ -36,20 +36,29 @@ local TX_QUEUE_MAX_BYTES = 16 * 1024
 -- ---------------------------------------------------------------------------
 -- Shared BUSY-line arbitration
 -- ---------------------------------------------------------------------------
+--
+-- Hardware schematic / pad labels used during wiring:
+--   BUSY_DEC -> module pad 24
+--   BUSY_IO  -> module pad 98
+--
+-- gpio.setup/gpio.get/gpio.set must use GPIO number, not module pad number.
+-- According to pins_air8000a.json:
+--   pad 24 -> GPIO21
+--   pad 98 -> GPIO3
+local BUSY_DEC_GPIO_NUMBER = 21
+local BUSY_IO_GPIO_NUMBER = 3
 
-local BUSY_DEC_GPIO_NUMBER = 24
-local BUSY_IO_GPIO_NUMBER = 98
-local BUSY_IDLE_STABLE_CHECKS = 3
-local BUSY_LOCK_RETRY_LIMIT = 60
+
 local BUSY_LOCK_BACKOFF_MIN_MS = 8
 local BUSY_LOCK_BACKOFF_MAX_MS = 25
-local BUSY_CLAIM_SETTLE_MS = 2
 
 local TX_SENT_EVENT = "UART1_TX_SENT"
 local TX_SENT_TIMEOUT_MIN_MS = 200
 local TX_SENT_TIMEOUT_PER_BYTE_MS = 2
 local TX_SEND_RETRY_LIMIT = 3
 local TX_SEND_RETRY_BACKOFF_MS = 30
+
+
 
 -- ---------------------------------------------------------------------------
 -- MQTT control command
@@ -62,6 +71,10 @@ local TX_SEND_RETRY_BACKOFF_MS = 30
 --   {"cmd":"bus_send","request_id":"bus-002","encoding":"text","data":"hello","append_crlf":true}
 local BUS_SEND_CMD = "bus_send"
 local MQTT_SERVER_COUNT = 2
+-- Periodically broadcast a simple server info JSON to the RS485 bus.
+-- Keep it short so STM32 devices can parse it easily.
+local SERVER_INFO_INTERVAL_MS = 60 * 1000
+local SERVER_INFO_CMD = "Server"
 
 uart.setup(
     UART_ID,
@@ -76,8 +89,9 @@ uart.setup(
     UART_TXRX_DELAY_US
 )
 
-gpio.setup(BUSY_IO_GPIO_NUMBER, 0)
-gpio.setup(BUSY_DEC_GPIO_NUMBER, nil, gpio.PULLDOWN)
+gpio.setup(BUSY_IO_GPIO_NUMBER, 1)  --设置输出模式
+gpio.setup(BUSY_DEC_GPIO_NUMBER, nil, gpio.PULLDOWN)--设置输入检测
+gpio.set(BUSY_IO_GPIO_NUMBER, 0)    --初始状态总线空闲，输出低电平
 
 math.randomseed(os.time())
 
@@ -97,6 +111,7 @@ local last_warn_at = {}
 local last_rx_at = 0
 local bus_lock_held = false
 local tx_sent_seq = 0
+local push_tx
 
 uart_reliable_queue.init({
     device_sn = EPD_STATUS and EPD_STATUS.get_sn and EPD_STATUS.get_sn() or "NO_SN",
@@ -205,6 +220,38 @@ local function reply_send(server_id, request_id, result, reason, extra)
     publish_to_server(server_id, body)
 end
 
+local function build_server_info_payload()
+    local payload, err = json_codec.encode({
+        [SERVER_INFO_CMD] = {
+            SN = get_device_sn(),
+            NtpTimeStamp = tostring((tonumber(os.time()) or 0))
+        }
+    })
+    if not payload then
+        return nil, err or "json_encode_failed"
+    end
+
+    -- Add line ending so bus-side devices can split frames easily.
+    return payload .. "\r\n"
+end
+
+local function queue_periodic_server_info()
+    local payload, err = build_server_info_payload()
+    if not payload then
+        warn_throttled("bus_server_info_encode", "UART", "server info encode failed", err or "")
+        return false
+    end
+
+    local ok, reason = push_tx(payload)
+    if not ok then
+        warn_throttled("bus_server_info_queue", "UART", "server info queue failed", reason or "")
+        return false
+    end
+
+    log.info("bus_server", "queued", "sn=" .. get_device_sn(), "ts=" .. tostring(os.time() or 0))
+    return true
+end
+
 -- ---------------------------------------------------------------------------
 -- Send-side state helpers
 -- ---------------------------------------------------------------------------
@@ -226,62 +273,45 @@ local function calc_tx_timeout_ms(data_len)
     return math.max(TX_SENT_TIMEOUT_MIN_MS, payload_len * TX_SENT_TIMEOUT_PER_BYTE_MS + TX_SENT_TIMEOUT_MIN_MS)
 end
 
-local function wait_bus_idle_once()
-    local stable_checks = 0
 
-    while stable_checks < BUSY_IDLE_STABLE_CHECKS do
-        if gpio.get(BUSY_DEC_GPIO_NUMBER) ~= 0 then
-            return false
-        end
+-- 获取随机数的函数 (Lua 的 math.random 范围是闭区间)
+local function get_rand_timeout()
+    -- 对应你 C 代码中的 RNG_Get_RandnomRange(300, 800)
+    return math.random(300, 800)
+end
 
-        stable_checks = stable_checks + 1
-        if stable_checks < BUSY_IDLE_STABLE_CHECKS then
-            sys.wait(1)
-        end
+--- 给485总线加锁
+-- @return boolean true 成功
+function bus_locked()
+    local timeout = 0
+
+    -- 第一轮忙检测
+    while gpio.get(BUSY_DEC_GPIO_NUMBER) == 1 do -- GPIO_PIN_SET 对应 1
+        timeout = get_rand_timeout()
+        log.debug("BUS", "总线正在使用; 稍等片刻 " .. timeout .. " ms")
+        sys.wait(timeout)
     end
+
+    -- 占用总线
+    -- 注意：根据你的 C 代码逻辑，占用是 WritePin(1)
+    gpio.set(BUSY_IO_GPIO_NUMBER, 1)
+    log.info("BUS", "总线锁定成功")
 
     return true
 end
 
-local function bus_locked()
-    if bus_lock_held then
-        return true
-    end
-
-    local retry = 0
-    while retry < BUSY_LOCK_RETRY_LIMIT do
-        if wait_bus_idle_once() then
-            sys.wait(math.random(BUSY_LOCK_BACKOFF_MIN_MS, BUSY_LOCK_BACKOFF_MAX_MS))
-            if gpio.get(BUSY_DEC_GPIO_NUMBER) == 0 then
-                gpio.set(BUSY_IO_GPIO_NUMBER, 1)
-                sys.wait(BUSY_CLAIM_SETTLE_MS)
-                if gpio.get(BUSY_DEC_GPIO_NUMBER) == 1 then
-                    bus_lock_held = true
-                    return true
-                end
-
-                gpio.set(BUSY_IO_GPIO_NUMBER, 0)
-            end
-        end
-
-        retry = retry + 1
-        sys.wait(math.random(BUSY_LOCK_BACKOFF_MIN_MS, BUSY_LOCK_BACKOFF_MAX_MS))
-    end
-
-    return false, "busy_timeout"
-end
-
-local function bus_unlocked()
-    if not bus_lock_held then
-        return true
-    end
-
+--- 给485总线解锁
+-- @return boolean true 成功
+function bus_unlocked()
+    -- 释放总线
     gpio.set(BUSY_IO_GPIO_NUMBER, 0)
-    sys.wait(BUSY_CLAIM_SETTLE_MS)
-    bus_lock_held = false
+
+    -- 对应 C 代码中的 osDelay(5)
+    sys.wait(5)
+
+    log.info("BUS", "总线解锁释放")
     return true
 end
-
 local function normalize_frame(frame)
     if type(frame) ~= "string" then
         return nil
@@ -331,7 +361,7 @@ end
 -- TX queue
 -- ---------------------------------------------------------------------------
 
-local function push_tx(data)
+push_tx = function(data)
     if type(data) ~= "string" or #data == 0 then
         return false, "empty_data"
     end
@@ -370,6 +400,9 @@ end
 --   {"cmd":"bus_send","adress":1,"u_cmd":"freq","v":60}
 -- Then device will auto-build:
 --   {"adress":1,"cmd":"freq","v":60}\r\n
+-- Or server can send a Server object directly:
+--   {"cmd":"bus_send","Server":{"SN":"001265CE","sensorAddr":33554945,"sensorName":"XT_278","sendFrequency":1}}
+-- Then device will send the same JSON body to BUS/485 and append "\r\n".
 local function build_short_bus_json_payload(obj)
     if type(obj) ~= "table" then
         return nil, "invalid_bus_json"
@@ -424,9 +457,44 @@ local function build_short_bus_json_payload(obj)
     }
 end
 
+local function build_server_object_payload(obj)
+    if type(obj) ~= "table" or type(obj.Server) ~= "table" then
+        return nil, "invalid_server_payload"
+    end
+
+    local payload, err = json_codec.encode({
+        Server = obj.Server
+    })
+    if not payload then
+        return nil, err or "json_encode_failed"
+    end
+
+    local server_obj = obj.Server
+    local u_cmd = ""
+    if server_obj.sendFrequency ~= nil then
+        u_cmd = "sendFrequency"
+    elseif server_obj.status ~= nil then
+        u_cmd = "status"
+    end
+
+    return payload .. "\r\n", {
+        encoding = "text",
+        bytes = #payload + 2,
+        append_crlf = true,
+        mode = "server_json",
+        sensorAddr = server_obj.sensorAddr,
+        sensorName = server_obj.sensorName,
+        u_cmd = u_cmd
+    }
+end
+
 local function build_server_send_payload(obj)
     if type(obj) ~= "table" then
         return nil, "invalid_payload"
+    end
+
+    if type(obj.Server) == "table" then
+        return build_server_object_payload(obj)
     end
 
     if (obj.data == nil or obj.data == "") and (obj.adress ~= nil or obj.id ~= nil or obj.u_cmd ~= nil) then
@@ -628,6 +696,66 @@ local function pop_line_frame()
     return true
 end
 
+-- If bus devices send JSON without "\r\n", split by one complete JSON object:
+--   {"a":1}{"b":2}
+-- becomes two frames even without an idle gap.
+local function find_json_frame_end(text)
+    if type(text) ~= "string" or text == "" then
+        return nil
+    end
+
+    local start_pos = text:find("%S")
+    if not start_pos then
+        return nil
+    end
+
+    if text:sub(start_pos, start_pos) ~= "{" then
+        return nil
+    end
+
+    local depth = 0
+    local in_string = false
+    local escaped = false
+
+    for i = start_pos, #text do
+        local ch = text:sub(i, i)
+
+        if in_string then
+            if escaped then
+                escaped = false
+            elseif ch == "\\" then
+                escaped = true
+            elseif ch == "\"" then
+                in_string = false
+            end
+        else
+            if ch == "\"" then
+                in_string = true
+            elseif ch == "{" then
+                depth = depth + 1
+            elseif ch == "}" then
+                depth = depth - 1
+                if depth == 0 then
+                    return i
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+local function pop_json_frame()
+    local end_pos = find_json_frame_end(rx_buf)
+    if not end_pos then
+        return false
+    end
+
+    push_frame(rx_buf:sub(1, end_pos))
+    rx_buf = rx_buf:sub(end_pos + 1)
+    return true
+end
+
 local function flush_rx_buffer_if_needed()
     if #rx_buf == 0 then
         return false
@@ -662,11 +790,15 @@ sys.taskInit(function()
             processed = true
         end
 
+        while pop_json_frame() do
+            processed = true
+        end
+
         if not processed then
             processed = flush_rx_buffer_if_needed()
         end
 
-        sys.wait(processed and 1 or 5)
+        sys.wait(processed and 1 or 2)
     end
 end)
 
@@ -689,7 +821,25 @@ local function handle_rx_frame(frame)
 
     queue_frame_to_existing_upload_path(frame)
 end
+local function visible_text(data, max_len)
+    if data == nil then
+        return "nil"
+    end
 
+    data = tostring(data)
+    max_len = max_len or 256
+
+    local s = data
+    if #s > max_len then
+        s = s:sub(1, max_len) .. string.format(" ... total=%d", #data)
+    end
+
+    s = s:gsub("\r", "\\r")
+    s = s:gsub("\n", "\\n")
+    s = s:gsub("\t", "\\t")
+
+    return s
+end
 -- ---------------------------------------------------------------------------
 -- RX process task: consume frame_queue and dispatch each frame
 -- ---------------------------------------------------------------------------
@@ -703,7 +853,8 @@ sys.taskInit(function()
             if not frame then
                 break
             end
-
+            log.info("UART_RX", "frame complete", "len=" .. tostring(#frame))
+            log.info("UART_RX", "ascii", visible_text(frame, 1024))
             handle_rx_frame(frame)
 
             processed = processed + 1
@@ -739,7 +890,8 @@ sys.taskInit(function()
             else
                 local expect_seq = tx_sent_seq + 1
                 local timeout_ms = calc_tx_timeout_ms(#pending_data)
-
+                log.info("UART", "tx len", #pending_data)
+                log.info("UART", "tx ascii", pending_data)
                 uart.write(UART_ID, pending_data)
 
                 if tx_sent_seq < expect_seq then
@@ -766,6 +918,21 @@ sys.taskInit(function()
         else
             sys.wait(10)
         end
+    end
+end)
+
+-- Periodic server broadcast:
+-- {"Server":{"SN":"<real sn>","NtpTimeStamp":"<real unix time>"}}\r\n
+-- It reuses the normal UART1 send queue, so BUSY lock handling stays unchanged.
+sys.taskInit(function()
+
+
+
+
+    sys.wait(5000)
+    while true do
+        queue_periodic_server_info()
+        sys.wait(SERVER_INFO_INTERVAL_MS)
     end
 end)
 
@@ -810,6 +977,8 @@ function M.handle_command(server_id, obj)
         "bytes=" .. tostring(meta_or_err.bytes),
         meta_or_err.adress ~= nil and ("adress=" .. tostring(meta_or_err.adress)) or "",
         meta_or_err.u_cmd and meta_or_err.u_cmd ~= "" and ("u_cmd=" .. tostring(meta_or_err.u_cmd)) or "",
+        meta_or_err.sensorAddr ~= nil and ("sensorAddr=" .. tostring(meta_or_err.sensorAddr)) or "",
+        meta_or_err.sensorName and meta_or_err.sensorName ~= "" and ("sensorName=" .. tostring(meta_or_err.sensorName)) or "",
         "bus_busy=" .. tostring(status.bus_busy),
         "queue_pending=" .. tostring(status.queue_pending)
     )

@@ -183,6 +183,7 @@ end
 
 local function read_tail_text(path)
     if not sd.init() then
+        sd.mark_fault("error_log_read_init_failed")
         log.error("error_log", "sd init failed before read", path)
         return nil
     end
@@ -284,6 +285,7 @@ local function publish_to_server(server_id, topic, payload, qos)
         return false
     end
 
+    log.info("error_log.tx", "topic=" .. tostring(topic), "qos=" .. tostring(qos or 1))
     sys.publish("mqtt" .. target .. "_send_data_req", "error_log", topic, payload, qos or 1)
     return true
 end
@@ -391,6 +393,7 @@ function M.handle_command(server_id, obj)
 
     local request_id = get_text(obj.request_id, "errlog-" .. tostring(os.time()))
     local limit = clamp_limit(obj.limit)
+    log.info("error_log.rx", "cmd=" .. cmd, "request_id=" .. request_id, "limit=" .. tostring(limit))
     local entries = load_recent_entries(limit)
 
     publish_entries(server_id, request_id, entries)

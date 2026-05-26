@@ -67,6 +67,14 @@ local function publish_to_server(server_id, body)
         return false
     end
 
+    log.info(
+        "rtc.tx",
+        "cmd=" .. tostring(body.cmd or ""),
+        "request_id=" .. tostring(body.request_id or ""),
+        "result=" .. tostring(body.result or ""),
+        "reason=" .. tostring(body.reason or ""),
+        "topic=" .. get_report_topic()
+    )
     sys.publish("mqtt" .. target .. "_send_data_req", "rtc_cmd", get_report_topic(), payload, 1)
     return true
 end
@@ -113,21 +121,28 @@ local function set_rtc_from_server_time(server_time, timezone_text)
     rtc.setBaseYear(1900)
     rtc.timezone(tz.quarter)
 
-    local local_time = os.date("!*t", epoch + tz.seconds)
-    if type(local_time) ~= "table" then
-        return false, "build_local_time_failed"
+    -- LuatOS RTC write expects epoch-based UTC calendar fields.
+    -- timezone is configured separately via rtc.timezone().
+    local rtc_time = os.date("!*t", epoch)
+    if type(rtc_time) ~= "table" then
+        return false, "build_rtc_time_failed"
     end
 
     local set_ok, err = pcall(rtc.set, {
-        year = local_time.year,
-        mon = local_time.month,
-        day = local_time.day,
-        hour = local_time.hour,
-        min = local_time.min,
-        sec = local_time.sec
+        year = rtc_time.year,
+        mon = rtc_time.month,
+        day = rtc_time.day,
+        hour = rtc_time.hour,
+        min = rtc_time.min,
+        sec = rtc_time.sec
     })
     if not set_ok then
         return false, err or "rtc_set_failed"
+    end
+
+    local local_time = os.date("!*t", epoch + tz.seconds)
+    if type(local_time) ~= "table" then
+        return false, "build_local_time_failed"
     end
 
     sys.publish("RTC_TIME_UPDATED", epoch, tz.text)
@@ -241,6 +256,14 @@ function M.handle_command(server_id, topic, obj)
     if server_time == nil then
         server_time = obj.time
     end
+
+    log.info(
+        "rtc.rx",
+        "cmd=" .. cmd,
+        "request_id=" .. request_id,
+        "serverTime=" .. tostring(server_time or ""),
+        "timezone=" .. tostring(obj.timezone or "")
+    )
 
     local ok, info_or_err = set_rtc_from_server_time(server_time, obj.timezone)
     if not ok then

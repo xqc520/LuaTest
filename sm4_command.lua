@@ -55,6 +55,14 @@ local function publish_to_server(server_id, body)
         return false
     end
 
+    log.info(
+        "sm4.tx",
+        "cmd=" .. tostring(body.cmd or ""),
+        "request_id=" .. tostring(body.request_id or ""),
+        "result=" .. tostring(body.result or ""),
+        "reason=" .. tostring(body.reason or ""),
+        "topic=" .. get_report_topic()
+    )
     sys.publish("mqtt" .. target .. "_send_data_req", "sm4_cmd", get_report_topic(), payload, 1)
     return true
 end
@@ -116,6 +124,14 @@ function M.handle_command(server_id, obj)
     local request_id = get_text(obj.request_id, "set-sm4-" .. tostring(os.time()))
     local key = get_text(obj.key, "")
     local iv = get_text(obj.iv, "")
+
+    log.info(
+        "sm4.rx",
+        "cmd=" .. cmd,
+        "request_id=" .. request_id,
+        "key_len=" .. tostring(#key),
+        "iv_len=" .. tostring(#iv)
+    )
 
     local ok, info_or_err = sm4_codec.validate_remote_config(key, iv)
     if not ok then

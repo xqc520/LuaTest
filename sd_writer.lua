@@ -39,8 +39,7 @@ end
 
 sys.taskInit(function()
     if not sd.init() then
-        log.error("sd_writer", "sd init failed")
-        return
+        log.error("sd_writer", "sd init failed on boot, writer will keep retrying")
     end
 
     while true do
@@ -71,9 +70,11 @@ sys.taskInit(function()
                     sd.mark_fault("sd_writer_open_failed")
                     log.error("sd_writer", "open failed", path, open_result or "")
                 else
+                    sd.mark_fault("sd_writer_busy")
                     log.error("sd_writer", "sd busy", path, open_result or "")
                 end
             else
+                sd.mark_fault("sd_writer_init_failed")
                 log.error("sd_writer", "sd reinit failed", path)
                 sys.wait(500)
             end

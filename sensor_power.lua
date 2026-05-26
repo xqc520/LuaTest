@@ -102,6 +102,14 @@ local function publish_to_server(server_id, body)
         return false
     end
 
+    log.info(
+        "sensor_power.tx",
+        "cmd=" .. tostring(body.cmd or ""),
+        "request_id=" .. tostring(body.request_id or ""),
+        "result=" .. tostring(body.result or ""),
+        "reason=" .. tostring(body.reason or ""),
+        "topic=" .. get_report_topic()
+    )
     sys.publish("mqtt" .. target .. "_send_data_req", "sensor_power", get_report_topic(), payload, 1)
     return true
 end
@@ -230,6 +238,7 @@ function M.handle_command(server_id, obj)
     local enable = normalize_enable(obj)
     local request_id = get_text(obj.request_id, "sensor-power-" .. tostring(os.time()))
     local auto_off_ms = tonumber(obj.auto_off_ms or obj.duration_ms or obj.timeout_ms or 0) or 0
+    log.info("sensor_power.rx", "cmd=" .. cmd, "request_id=" .. request_id, "enable=" .. tostring(enable), "auto_off_ms=" .. tostring(auto_off_ms))
 
     if enable == nil then
         reply(server_id, request_id, -1, "invalid_state", {
