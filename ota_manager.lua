@@ -13,6 +13,19 @@ local PRIMARY_MQTT_SERVER_ID = 1
 local OTA_LOG_TAG = "ota"
 local MAX_PAYLOAD_PREVIEW = 200
 
+local DEFAULT_SN = "NO_SN"
+local DEFAULT_IMEI = "NO_IMEI"
+local DEFAULT_PROJECT = "UNKNOWN"
+local DEFAULT_VERSION = "0.0.0"
+local OTA_EXEC_EVENT = "OTA_EXEC_REQUEST"
+local DEFAULT_INVALID_PAYLOAD_MSG = "invalid ota payload"
+local DEFAULT_MISSING_URL_MSG = "missing ota url"
+local DEFAULT_INVALID_VERSION_MSG = "invalid target version"
+
+-- ---------------------------------------------------------------------------
+-- 通用小工具
+-- ---------------------------------------------------------------------------
+
 local function get_text(value, default)
     if type(value) == "string" and value ~= "" then
         return value
@@ -36,42 +49,6 @@ local function preview_text(value)
     end
 
     return text
-end
-
-local function split_version(value)
-    if type(value) ~= "string" or value == "" then
-        return nil
-    end
-
-    local parts = {}
-    for num in value:gmatch("(%d+)") do
-        parts[#parts + 1] = tonumber(num) or 0
-        if #parts >= VERSION_PARTS then
-            break
-        end
-    end
-
-    if #parts == 0 then
-        return nil
-    end
-
-    return parts
-end
-
-local function normalize_custom_url(url)
-    if type(url) ~= "string" or url == "" then
-        return nil
-    end
-
-    if url:find("^###") then
-        return url
-    end
-
-    if url:find("^https?://") then
-        return "###" .. url
-    end
-
-    return url
 end
 
 local function normalize_payload_text(payload)
@@ -102,19 +79,43 @@ local function publish_to_server(server_id, topic, payload, qos)
     return target
 end
 
+-- ---------------------------------------------------------------------------
+-- 设备信息与版本处理
+-- ---------------------------------------------------------------------------
+
+local function split_version(value)
+    if type(value) ~= "string" or value == "" then
+        return nil
+    end
+
+    local parts = {}
+    for num in value:gmatch("(%d+)") do
+        parts[#parts + 1] = tonumber(num) or 0
+        if #parts >= VERSION_PARTS then
+            break
+        end
+    end
+
+    if #parts == 0 then
+        return nil
+    end
+
+    return parts
+end
+
 function M.get_device_info()
-    local sn = "NO_SN"
+    local sn = DEFAULT_SN
     if EPD_STATUS and EPD_STATUS.get_sn then
         sn = get_text(EPD_STATUS.get_sn(), sn)
     end
 
-    local imei = "NO_IMEI"
+    local imei = DEFAULT_IMEI
     if mobile and mobile.imei then
         imei = get_text(mobile.imei(), imei)
     end
 
-    local project = tostring(PROJECT or "UNKNOWN")
-    local version = tostring(VERSION or "0.0.0")
+    local project = tostring(PROJECT or DEFAULT_PROJECT)
+    local version = tostring(VERSION or DEFAULT_VERSION)
     local firmware = project .. "-" .. version
 
     local core_version = ""
@@ -152,6 +153,10 @@ function M.compare_versions(left, right)
     return 0
 end
 
+-- ---------------------------------------------------------------------------
+-- OTA topic 与请求解析
+-- ---------------------------------------------------------------------------
+
 function M.get_subscribe_topics()
     local device_info = M.get_device_info()
 
@@ -166,6 +171,22 @@ function M.is_ota_topic(topic)
     end
 
     return M.get_subscribe_topics()[topic] ~= nil
+end
+
+local function normalize_custom_url(url)
+    if type(url) ~= "string" or url == "" then
+        return nil
+    end
+
+    if url:find("^###") then
+        return url
+    end
+
+    if url:find("^https?://") then
+        return "###" .. url
+    end
+
+    return url
 end
 
 -- OTA 下发支持三种最常见格式：
@@ -191,7 +212,7 @@ local function parse_request_body(payload)
         return {}, nil
     end
 
-    return nil, err or "invalid ota payload"
+    return nil, err or DEFAULT_INVALID_PAYLOAD_MSG
 end
 
 function M.build_request(server_id, topic, payload)
@@ -203,12 +224,12 @@ function M.build_request(server_id, topic, payload)
     local device_info = M.get_device_info()
     local version = get_text(body.version, nil)
     if version and not split_version(version) then
-        return nil, "invalid target version"
+        return nil, DEFAULT_INVALID_VERSION_MSG
     end
 
     local normalized_url = normalize_custom_url(body.url)
     if not normalized_url then
-        return nil, "missing ota url"
+        return nil, DEFAULT_MISSING_URL_MSG
     end
 
     local timeout = tonumber(body.timeout)
@@ -228,6 +249,10 @@ function M.build_request(server_id, topic, payload)
         requested_at = os.time()
     }
 end
+
+-- ---------------------------------------------------------------------------
+-- OTA 回包
+-- ---------------------------------------------------------------------------
 
 function M.get_report_topic()
     return mqtt_topics.get_ota_report_topic(M.get_device_info().sn)
@@ -253,7 +278,13 @@ function M.publish_report(server_id, report)
         return false
     end
 
-    local target_server = publish_to_server(server_id or (report and report.source_server), M.get_report_topic(), payload, OTA_REPORT_QOS)
+    local target_server = publish_to_server(
+        server_id or (report and report.source_server),
+        M.get_report_topic(),
+        payload,
+        OTA_REPORT_QOS
+    )
+
     log.info(
         OTA_LOG_TAG,
         "tx report",
@@ -270,6 +301,10 @@ function M.publish_report(server_id, report)
     )
     return true
 end
+
+-- ---------------------------------------------------------------------------
+-- OTA 消息入口
+-- ---------------------------------------------------------------------------
 
 function M.handle_message(server_id, topic, payload)
     if not M.is_ota_topic(topic) then
@@ -289,18 +324,19 @@ function M.handle_message(server_id, topic, payload)
 
     local request, err = M.build_request(server_id, topic, payload)
     if not request then
-        log.warn(OTA_LOG_TAG, "reject update", err or "invalid ota payload")
+        log.warn(OTA_LOG_TAG, "reject update", err or DEFAULT_INVALID_PAYLOAD_MSG)
         M.publish_report(server_id, {
             status = "invalid_payload",
-            message = err or "invalid ota payload",
+            message = err or DEFAULT_INVALID_PAYLOAD_MSG,
             source_server = server_id,
             source_topic = topic
         })
         return true
     end
 
+    local current_version = M.get_device_info().version
     if request.version and not request.force then
-        local cmp = M.compare_versions(request.version, M.get_device_info().version)
+        local cmp = M.compare_versions(request.version, current_version)
         if cmp and cmp <= 0 then
             log.info(
                 OTA_LOG_TAG,
@@ -310,7 +346,7 @@ function M.handle_message(server_id, topic, payload)
                 "target_version",
                 tostring(request.version),
                 "current_version",
-                tostring(M.get_device_info().version)
+                tostring(current_version)
             )
             M.publish_report(server_id, {
                 request_id = request.request_id,
@@ -340,7 +376,8 @@ function M.handle_message(server_id, topic, payload)
         "url",
         preview_text(request.url or "")
     )
-    sys.publish("OTA_EXEC_REQUEST", request)
+
+    sys.publish(OTA_EXEC_EVENT, request)
     return true
 end
 

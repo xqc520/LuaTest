@@ -41,25 +41,7 @@ sys/{SN}/ota/up/resport
 - `url`：升级包地址，必填
 - `md5`：文件 MD5，可选；如果填写，设备会先做真校验
 
-如果你不想做 MD5 校验，也可以只发：
-
-```json
-{
-  "request_id": "ota-001",
-  "url": "http://example.com/ota/firmware.bin"
-}
-```
-
 ## 3. 设备处理流程
-
-### 不带 md5
-
-1. 设备收到 OTA 请求
-2. 检查 `url`
-3. 回 `start`
-4. 开始 OTA
-5. 成功回 `success`
-6. 失败回 `failed`
 
 ### 带 md5
 

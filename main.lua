@@ -1,9 +1,9 @@
 ---@diagnostic disable: undefined-global
 
 PROJECT = "MQTT"
-VERSION = "001.000.002"
+VERSION = "001.000.004"
 
--- Boot-time behaviour switches. Keep them集中在文件顶部，方便现场排查时统一看。
+-- 启动阶段的开关项，集中放在顶部，方便现场排查时统一查看。
 local ENABLE_PERIODIC_STATUS_LOG = true
 local STATUS_LOG_INTERVAL_MS = 60000
 local WAIT_4G_LOG_INTERVAL_SEC = 10
@@ -13,31 +13,41 @@ local ENABLE_FIELD_DEBUG_LOG = true
 local FIELD_DEBUG_INTERVAL_MS = 5000
 local PRIMARY_MQTT_SERVER_ID = 1
 
-
-
-
-
-
-
-
-
--- Basic hardware defaults that should be ready before the rest of the project starts.
-gpio.setup(141, 1, gpio.PULLUP)
+-- 这些基础硬件/模块需要在项目其余逻辑启动前先准备好。
+local BOOT_GPIO_PIN = 141
+local SENSOR_POWER_EN_GPIO = 16
+local SENSOR_POWER_ON_LEVEL = 1
+local SENSOR_POWER_OFF_LEVEL = 0
+gpio.setup(BOOT_GPIO_PIN, 1, gpio.PULLUP)
 log.info("main", "project", PROJECT, "version", VERSION)
 
-if wdt then
-    wdt.init(9000)
-    sys.timerLoopStart(wdt.feed, 3000)
+local function start_watchdog()
+    if wdt then
+        wdt.init(9000)
+        sys.timerLoopStart(wdt.feed, 3000)
+    end
 end
 
+start_watchdog()
+
+local function init_sensor_power_gpio()
+    gpio.setup(SENSOR_POWER_EN_GPIO, SENSOR_POWER_OFF_LEVEL, gpio.PULLDOWN)
+    gpio.set(SENSOR_POWER_EN_GPIO, SENSOR_POWER_ON_LEVEL)
+    log.info("main", "sensor power gpio init", SENSOR_POWER_EN_GPIO, "on")
+end
+
+-- ---------------------------------------------------------------------------
+-- 基础模块启动
+-- ---------------------------------------------------------------------------
+-- 下面这部分尽量保持初始化顺序不变，避免影响原有启动时序。
+
+init_sensor_power_gpio()
 require("epd_main")
 local status_leds = require("status_leds")
-local sensor_power = require("sensor_power")
 flash_config = require("flash_config")
 require("epd_status")
 EPD_STATUS.init()
 status_leds.init()
-sensor_power.init(true)
 local mqtt_topics = require("mqtt_topics")
 
 local boot_cfg = flash_config.get()
@@ -46,24 +56,28 @@ local boot_should_start_network = flash_config.is_config_complete(boot_cfg)
 local boot_should_start_ap = flash_config.should_start_ap_config(boot_cfg)
 local device_sn = EPD_STATUS.get_sn()
 
-if boot_should_start_ap then
-    log.warn("boot", "config incomplete, start AP config mode and close after 5 minutes")
-    if not boot_should_start_network then
-        EPD_STATUS.set_mode("CFG AP ON")
+local function init_boot_mode()
+    if boot_should_start_ap then
+        log.warn("boot", "config incomplete, start AP config mode and close after 5 minutes")
+        if not boot_should_start_network then
+            EPD_STATUS.set_mode("CFG AP ON")
+        else
+            EPD_STATUS.set_mode("AP 5MIN")
+        end
     else
+        log.info("boot", "config complete, AP config mode will close after 5 minutes")
         EPD_STATUS.set_mode("AP 5MIN")
     end
-else
-    log.info("boot", "config complete, AP config mode will close after 5 minutes")
-    EPD_STATUS.set_mode("AP 5MIN")
 end
+
+init_boot_mode()
 
 require("ap_config_net")
 
 require("sd_writer")
 local error_logger = require("error_logger")
 local uart485 = require("485uart")
---require("uart10_dg")
+-- require("uart10_dg")
 require("uart11_232")
 require("uart12_485")
 local device_metrics = require("device_metrics")
@@ -71,7 +85,7 @@ local device_metrics = require("device_metrics")
 local server_status = { "offline", "offline" }
 
 -- ---------------------------------------------------------------------------
--- Runtime status helpers
+-- 运行时状态辅助函数
 -- ---------------------------------------------------------------------------
 
 local function get_now_string()
@@ -131,7 +145,7 @@ local function preview_payload(payload, max_len)
     return text:sub(1, limit) .. "..."
 end
 
--- Field log is the single summary line used during outdoor maintenance.
+-- 现场维护日志：周期性打印一行摘要，方便快速判断设备状态。
 local function start_field_debug_log()
     if not ENABLE_FIELD_DEBUG_LOG then
         return
@@ -153,7 +167,7 @@ local function start_field_debug_log()
 end
 
 -- ---------------------------------------------------------------------------
--- EPD status helpers
+-- EPD 状态辅助函数
 -- ---------------------------------------------------------------------------
 
 local function update_epd_mode()
@@ -216,7 +230,7 @@ local function make_mqtt_status_handler(index)
 end
 
 -- ---------------------------------------------------------------------------
--- Network and MQTT boot helpers
+-- 网络与 MQTT 启动辅助函数
 -- ---------------------------------------------------------------------------
 
 local function apply_apn_config(cfg)
@@ -236,7 +250,7 @@ local function apply_apn_config(cfg)
     end
 end
 
--- Wait until the 4G default adapter has a usable IP.
+-- 等待 4G 默认适配器真正拿到可用 IP。
 local function wait_for_4g_ready()
     local last_wait_log_at = 0
 
@@ -285,6 +299,63 @@ local function is_down_cmd_topic(topic)
     return topic == mqtt_topics.get_down_cmd_topic(device_sn)
 end
 
+local function start_periodic_server_status_log()
+    if not ENABLE_PERIODIC_STATUS_LOG or #enabled_servers == 0 then
+        return
+    end
+
+    sys.taskInit(function()
+        while true do
+            sys.wait(STATUS_LOG_INTERVAL_MS)
+            log.info("main", "server status", table.concat(server_status, ", "))
+        end
+    end)
+end
+
+-- 只允许 MQTT1 处理控制类流量。
+local function build_primary_server_dispatcher(rtc_app, sm4_command, uart_reliable_queue)
+    return function(server_id, topic, obj)
+        if rtc_app.handle_command(server_id, topic, obj) then
+            return true
+        end
+
+        if not is_down_cmd_topic(topic) then
+            return true
+        end
+
+        if sm4_command.handle_command(server_id, obj) then
+            return true
+        end
+
+        if uart485 and uart485.handle_command and uart485.handle_command(server_id, obj) then
+            return true
+        end
+
+        if device_metrics.handle_command(server_id, obj) then
+            return true
+        end
+
+        if error_logger.handle_command(server_id, obj) then
+            return true
+        end
+
+        return false
+    end
+end
+
+local function start_delayed_network_boot()
+    sys.taskInit(function()
+        log.info("boot", "delay network start for AP stability", NETWORK_START_DELAY_MS, "ms")
+        sys.wait(NETWORK_START_DELAY_MS)
+        EPD_STATUS.set_mode("4G WAIT")
+        require("netdrv_4g")
+        apply_apn_config(boot_cfg)
+        wait_for_4g_ready()
+        mark_enabled_servers_connecting(enabled_servers)
+        start_enabled_mqtt_channels(enabled_servers)
+    end)
+end
+
 start_field_debug_log()
 
 if boot_should_start_network then
@@ -302,57 +373,14 @@ if boot_should_start_network then
     local ota_manager = require("ota_manager")
     local sm4_command = require("sm4_command")
     local uart_reliable_queue = require("uart_reliable_queue")
+    local dispatch_primary_server_command = build_primary_server_dispatcher(rtc_app, sm4_command, uart_reliable_queue)
 
     sys.subscribe("MQTT1_CONN_EVENT", make_mqtt_status_handler(1))
     sys.subscribe("MQTT2_CONN_EVENT", make_mqtt_status_handler(2))
+
     gnss.start()
     device_metrics.start_periodic_realtime_reporter(PRIMARY_MQTT_SERVER_ID)
-
-    if ENABLE_PERIODIC_STATUS_LOG and #enabled_servers > 0 then
-        sys.taskInit(function()
-            while true do
-                sys.wait(STATUS_LOG_INTERVAL_MS)
-                log.info("main", "server status", table.concat(server_status, ", "))
-            end
-        end)
-    end
-
-    -- Only MQTT1 is allowed to process control traffic.
-    local function dispatch_primary_server_command(server_id, topic, obj)
-        if rtc_app.handle_command(server_id, topic, obj) then
-            return true
-        end
-
-        if not is_down_cmd_topic(topic) then
-            return true
-        end
-
-        if sm4_command.handle_command(server_id, obj) then
-            return true
-        end
-
-        if sensor_power.handle_command(server_id, obj) then
-            return true
-        end
-
-        if uart485 and uart485.handle_command and uart485.handle_command(server_id, obj) then
-            return true
-        end
-
-        if device_metrics.handle_command(server_id, obj) then
-            return true
-        end
-
-        if uart_reliable_queue.handle_command(server_id, obj) then
-            return true
-        end
-
-        if error_logger.handle_command(server_id, obj) then
-            return true
-        end
-
-        return false
-    end
+    start_periodic_server_status_log()
 
     local function handle_server_message(server_id, topic, payload)
         if server_id ~= PRIMARY_MQTT_SERVER_ID then
@@ -388,21 +416,9 @@ if boot_should_start_network then
     end)
 
     log.info("device", "sn", EPD_STATUS.get_sn())
-
-    -- Delay 4G startup a little so AP configuration mode is stable first.
-    sys.taskInit(function()
-        log.info("boot", "delay network start for AP stability", NETWORK_START_DELAY_MS, "ms")
-        sys.wait(NETWORK_START_DELAY_MS)
-        EPD_STATUS.set_mode("4G WAIT")
-        require("netdrv_4g")
-        apply_apn_config(boot_cfg)
-        wait_for_4g_ready()
-        mark_enabled_servers_connecting(enabled_servers)
-        start_enabled_mqtt_channels(enabled_servers)
-    end)
+    start_delayed_network_boot()
 else
     log.warn("boot", "skip 4G/MQTT/network watchdog until config is complete")
 end
-
 
 sys.run()

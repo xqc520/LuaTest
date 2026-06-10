@@ -5,7 +5,7 @@ local exgnss = require("exgnss")
 local M = {}
 
 -- ---------------------------------------------------------------------------
--- GNSS runtime configuration
+-- GNSS 运行参数
 -- ---------------------------------------------------------------------------
 
 local GNSS_MODE = 2
@@ -15,12 +15,13 @@ local STATUS_LOG_INTERVAL_MS = 10 * 1000
 local GNSS_APP_MODE = exgnss.DEFAULT
 local GNSS_APP_TAG = "project"
 
+-- 只有在卫星数、HDOP、连续稳定次数都达标时，才认为当前位置可用。
 local MIN_SATELLITES = 5
 local MAX_HDOP = 3
 local REQUIRED_STABLE_FIXES = 3
 
 -- ---------------------------------------------------------------------------
--- Runtime state
+-- 运行时状态
 -- ---------------------------------------------------------------------------
 
 local started = false
@@ -39,7 +40,7 @@ local last_quality = {
 }
 
 -- ---------------------------------------------------------------------------
--- Small helpers
+-- 小工具函数
 -- ---------------------------------------------------------------------------
 
 local function set_reason(reason)
@@ -57,8 +58,25 @@ local function save_location(lat, lng)
     set_reason("fixed")
 end
 
+local function reset_stable_fix(reason)
+    set_reason(reason)
+    last_quality.stable_count = 0
+    return false
+end
+
+local function update_quality(quality)
+    last_quality.satellites = quality.satellites
+    last_quality.hdop = quality.hdop
+    last_quality.fix_quality = quality.fix_quality
+end
+
+local function format_hdop(value)
+    return string.format("%.2f", tonumber(value) or 99)
+end
+
 -- ---------------------------------------------------------------------------
--- GNSS library compatibility wrappers
+-- exgnss 兼容层
+-- 不同版本的 exgnss 命名可能略有区别，这里统一兜底。
 -- ---------------------------------------------------------------------------
 
 local function call_first(fn1, fn2, ...)
@@ -80,7 +98,7 @@ local function is_fix()
 end
 
 -- ---------------------------------------------------------------------------
--- Raw GNSS read helpers
+-- 原始 GNSS 数据读取
 -- ---------------------------------------------------------------------------
 
 local function read_rmc()
@@ -123,44 +141,34 @@ local function read_gga_quality()
 end
 
 -- ---------------------------------------------------------------------------
--- Quality filter: only keep stable fixes
+-- 定位质量过滤
+-- 这里不是“读到坐标就算成功”，而是要求坐标连续稳定几次后才采信。
 -- ---------------------------------------------------------------------------
 
 local function refresh_location()
     local lat, lng = read_rmc()
     local quality = read_gga_quality()
 
-    last_quality.satellites = quality.satellites
-    last_quality.hdop = quality.hdop
-    last_quality.fix_quality = quality.fix_quality
+    update_quality(quality)
 
     if not lat or not lng then
-        last_quality.stable_count = 0
-        return false
+        return reset_stable_fix(last_reason)
     end
 
     if not is_fix() then
-        set_reason("fix_false")
-        last_quality.stable_count = 0
-        return false
+        return reset_stable_fix("fix_false")
     end
 
     if quality.fix_quality < 1 then
-        set_reason("fix_quality_low")
-        last_quality.stable_count = 0
-        return false
+        return reset_stable_fix("fix_quality_low")
     end
 
     if quality.satellites < MIN_SATELLITES then
-        set_reason("low_satellites")
-        last_quality.stable_count = 0
-        return false
+        return reset_stable_fix("low_satellites")
     end
 
     if type(quality.hdop) ~= "number" or quality.hdop <= 0 or quality.hdop > MAX_HDOP then
-        set_reason("hdop_poor")
-        last_quality.stable_count = 0
-        return false
+        return reset_stable_fix("hdop_poor")
     end
 
     last_quality.stable_count = last_quality.stable_count + 1
@@ -174,7 +182,7 @@ local function refresh_location()
 end
 
 -- ---------------------------------------------------------------------------
--- Setup / open helpers
+-- 初始化与启动
 -- ---------------------------------------------------------------------------
 
 local function gnss_fix_callback()
@@ -248,6 +256,7 @@ local function open_gnss(source)
     return true
 end
 
+-- 周期打印当前定位状态，便于现场查看 GNSS 是否已经稳定。
 local function log_position_status()
     if not is_active() then
         open_gnss("retry")
@@ -261,7 +270,7 @@ local function log_position_status()
             "lat=" .. string.format("%.6f", last_location.latitude),
             "lng=" .. string.format("%.6f", last_location.longitude),
             "sats=" .. tostring(last_quality.satellites),
-            "hdop=" .. string.format("%.2f", tonumber(last_quality.hdop) or 99),
+            "hdop=" .. format_hdop(last_quality.hdop),
             "stable=" .. tostring(last_quality.stable_count)
         )
     else
@@ -271,13 +280,17 @@ local function log_position_status()
             "waiting",
             "reason=" .. tostring(last_reason),
             "sats=" .. tostring(last_quality.satellites),
-            "hdop=" .. string.format("%.2f", tonumber(last_quality.hdop) or 99),
+            "hdop=" .. format_hdop(last_quality.hdop),
             "stable=" .. tostring(last_quality.stable_count) .. "/" .. tostring(REQUIRED_STABLE_FIXES),
             "fix=" .. tostring(is_fix())
         )
     end
 end
 
+-- 对外启动入口：
+-- 1. 只启动一次
+-- 2. 延时拉起 GNSS，避免开机瞬间竞争资源
+-- 3. 后台定时打印定位状态
 function M.start()
     if started then
         return true
@@ -306,6 +319,9 @@ function M.start()
     return true
 end
 
+-- 对外读取当前位置：
+-- 1. 如果缓存里还没有有效坐标，会先尝试刷新一次
+-- 2. 仍然没有有效坐标时返回 nil
 function M.get_location()
     if not has_location() then
         refresh_location()

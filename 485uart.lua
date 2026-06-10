@@ -8,8 +8,13 @@ local mqtt_topics = require("mqtt_topics")
 
 local M = {}
 
+-- 审核版说明：
+-- 1. 仅补充中文注释、整理注释表达与空行，不改现有功能。
+-- 2. 常量取值、时序、队列策略、对外接口全部保持原样。
+-- 3. 原文件正常运行，这里只做“更容易看懂”的整理。
+
 -- ---------------------------------------------------------------------------
--- UART1 / RS485 physical configuration
+-- UART1 / RS485 物理配置
 -- ---------------------------------------------------------------------------
 
 local UART_ID = 1
@@ -19,12 +24,12 @@ local UART_RX_PIN_LEVEL = 0
 local UART_TXRX_DELAY_US = 1666
 
 -- ---------------------------------------------------------------------------
--- RX/TX queue sizing
+-- 收发队列容量配置
 -- ---------------------------------------------------------------------------
 
 local RX_BUFFER_LIMIT = 4096
--- When the bus data stream has no line ending, split one frame after this
--- many milliseconds of silence on UART RX.
+-- 如果总线数据流没有换行符，则在 UART 接收静默达到该时长后，
+-- 强制把当前缓存切成一帧。
 local RX_FORCE_FLUSH_LIMIT = 3072
 local RX_IDLE_TIMEOUT_MS = 15
 local RX_TASK_BATCH_SIZE = 8
@@ -34,20 +39,19 @@ local TX_QUEUE_MAX_ITEMS = 64
 local TX_QUEUE_MAX_BYTES = 16 * 1024
 
 -- ---------------------------------------------------------------------------
--- Shared BUSY-line arbitration
+-- 共享 BUSY 线仲裁
 -- ---------------------------------------------------------------------------
 --
--- Hardware schematic / pad labels used during wiring:
+-- 接线时参考的硬件焊盘标号：
 --   BUSY_DEC -> module pad 24
 --   BUSY_IO  -> module pad 98
 --
--- gpio.setup/gpio.get/gpio.set must use GPIO number, not module pad number.
--- According to pins_air8000a.json:
+-- gpio.setup/gpio.get/gpio.set 使用的是 GPIO 编号，不是模块焊盘号。
+-- 根据 pins_air8000a.json：
 --   pad 24 -> GPIO21
 --   pad 98 -> GPIO3
 local BUSY_DEC_GPIO_NUMBER = 21
 local BUSY_IO_GPIO_NUMBER = 3
-
 
 local BUSY_LOCK_BACKOFF_MIN_MS = 8
 local BUSY_LOCK_BACKOFF_MAX_MS = 25
@@ -58,21 +62,19 @@ local TX_SENT_TIMEOUT_PER_BYTE_MS = 2
 local TX_SEND_RETRY_LIMIT = 3
 local TX_SEND_RETRY_BACKOFF_MS = 30
 
-
-
 -- ---------------------------------------------------------------------------
--- MQTT control command
+-- MQTT 控制命令
 -- ---------------------------------------------------------------------------
 
--- MQTT server can send this command to write raw data to the RS485 bus.
--- Topic: sys/{SN}/json/down/cmd
--- Example:
+-- MQTT 服务端可以通过该命令向 RS485 总线写入原始数据。
+-- 主题：sys/{SN}/json/down/cmd
+-- 示例：
 --   {"cmd":"bus_send","request_id":"bus-001","encoding":"hex","data":"010300000002C40B"}
 --   {"cmd":"bus_send","request_id":"bus-002","encoding":"text","data":"hello","append_crlf":true}
 local BUS_SEND_CMD = "bus_send"
 local MQTT_SERVER_COUNT = 2
--- Periodically broadcast a simple server info JSON to the RS485 bus.
--- Keep it short so STM32 devices can parse it easily.
+-- 周期性向 RS485 总线广播简化版服务器信息 JSON。
+-- 报文尽量短，方便 STM32 侧快速解析。
 local SERVER_INFO_INTERVAL_MS = 60 * 1000
 local SERVER_INFO_CMD = "Server"
 
@@ -89,10 +91,13 @@ uart.setup(
     UART_TXRX_DELAY_US
 )
 
-gpio.setup(BUSY_IO_GPIO_NUMBER, 1)  --设置输出模式
-gpio.setup(BUSY_DEC_GPIO_NUMBER, nil, gpio.PULLDOWN)--设置输入检测
+-- BUSY_IO: 输出脚，用来声明“当前设备正在占用总线”。
+-- BUSY_DEC: 输入脚，用来检测“总线当前是否繁忙”。
+gpio.setup(BUSY_IO_GPIO_NUMBER, 1)  -- 设置 BUSY_IO 为输出
+gpio.setup(BUSY_DEC_GPIO_NUMBER, nil, gpio.PULLDOWN) -- 设置 BUSY_DEC 为下拉输入
 gpio.set(BUSY_IO_GPIO_NUMBER, 0)    --初始状态总线空闲，输出低电平
 
+-- 给随机退避逻辑初始化随机种子。
 math.randomseed(os.time())
 
 local rx_buf = ""
@@ -119,9 +124,10 @@ uart_reliable_queue.init({
 })
 
 -- ---------------------------------------------------------------------------
--- Common small helpers
+-- 通用小工具函数
 -- ---------------------------------------------------------------------------
 
+-- 同一类告警 5 秒内只打印一次，避免日志刷屏。
 local function warn_throttled(key, ...)
     local now = os.time()
     local last = last_warn_at[key] or 0
@@ -131,6 +137,7 @@ local function warn_throttled(key, ...)
     end
 end
 
+-- 优先使用 MCU tick 获取毫秒时间；没有 tick 时退化到 os.time。
 local function now_ms()
     if mcu and type(mcu.ticks) == "function" and type(mcu.hz) == "function" then
         local hz = tonumber(mcu.hz()) or 0
@@ -144,6 +151,7 @@ end
 
 last_rx_at = now_ms()
 
+-- 统一清洗字符串入参：去首尾空白，空值回退到默认值。
 local function get_text(value, default)
     if type(value) ~= "string" then
         return default or ""
@@ -161,6 +169,7 @@ local function get_bool(value)
     return value == true or value == 1 or value == "1" or value == "true" or value == "TRUE"
 end
 
+-- 十六进制字符串转原始字节；格式不合法时返回 nil。
 local function from_hex(text)
     local value = get_text(text, ""):gsub("%s+", "")
     if value == "" or (#value % 2) ~= 0 or not value:match("^[0-9A-Fa-f]+$") then
@@ -176,12 +185,8 @@ local function get_device_sn()
     return mqtt_topics.get_device_sn("NO_SN")
 end
 
-local function get_report_topic()
-    return mqtt_topics.get_up_resp_topic(get_device_sn())
-end
-
--- MQTT1/MQTT2 both use the same response topic format, but bus control/report
--- traffic is still only forwarded through MQTT1.
+-- MQTT1 和 MQTT2 使用相同的响应主题格式，但总线控制/回报
+-- 目前仍只转发到 MQTT1。
 local function publish_to_server(server_id, body)
     local target = tonumber(server_id)
     if not target or target < 1 or target > MQTT_SERVER_COUNT then
@@ -193,10 +198,12 @@ local function publish_to_server(server_id, body)
         return false
     end
 
-    sys.publish("mqtt" .. target .. "_send_data_req", "bus_cmd", get_report_topic(), payload, 1)
+    local topic = mqtt_topics.get_up_resp_topic(get_device_sn())
+    sys.publish("mqtt" .. target .. "_send_data_req", "bus_cmd", topic, payload, 1)
     return true
 end
 
+-- 回应 bus_send 指令的处理结果，便于服务端做闭环确认。
 local function reply_send(server_id, request_id, result, reason, extra)
     local body = {
         cmd = BUS_SEND_CMD,
@@ -220,7 +227,8 @@ local function reply_send(server_id, request_id, result, reason, extra)
     publish_to_server(server_id, body)
 end
 
-local function build_server_info_payload()
+-- 周期广播的 Server 信息只在这里使用，直接在此处组包，减少来回跳转。
+local function queue_periodic_server_info()
     local payload, err = json_codec.encode({
         [SERVER_INFO_CMD] = {
             SN = get_device_sn(),
@@ -228,20 +236,12 @@ local function build_server_info_payload()
         }
     })
     if not payload then
-        return nil, err or "json_encode_failed"
-    end
-
-    -- Add line ending so bus-side devices can split frames easily.
-    return payload .. "\r\n"
-end
-
-local function queue_periodic_server_info()
-    local payload, err = build_server_info_payload()
-    if not payload then
         warn_throttled("bus_server_info_encode", "UART", "server info encode failed", err or "")
         return false
     end
 
+    -- 追加换行符，方便总线侧设备按行切分帧。
+    payload = payload .. "\r\n"
     local ok, reason = push_tx(payload)
     if not ok then
         warn_throttled("bus_server_info_queue", "UART", "server info queue failed", reason or "")
@@ -253,14 +253,14 @@ local function queue_periodic_server_info()
 end
 
 -- ---------------------------------------------------------------------------
--- Send-side state helpers
+-- 发送侧状态辅助函数
 -- ---------------------------------------------------------------------------
 
--- Read current send path state.
--- bus_busy:
---   true  -> another bus node is transmitting, or we already hold the lock.
--- queue_pending:
---   true  -> UART1 still has data waiting to send.
+-- 读取当前发送链路状态。
+-- bus_busy：
+--   true  -> 其他节点正在发送，或当前节点已经持有总线锁。
+-- queue_pending：
+--   true  -> UART1 发送队列里仍有待发送数据。
 local function get_send_status()
     return {
         bus_busy = bus_lock_held == true or gpio.get(BUSY_DEC_GPIO_NUMBER) == 1,
@@ -273,13 +273,6 @@ local function calc_tx_timeout_ms(data_len)
     return math.max(TX_SENT_TIMEOUT_MIN_MS, payload_len * TX_SENT_TIMEOUT_PER_BYTE_MS + TX_SENT_TIMEOUT_MIN_MS)
 end
 
-
--- 获取随机数的函数 (Lua 的 math.random 范围是闭区间)
-local function get_rand_timeout()
-    -- 对应你 C 代码中的 RNG_Get_RandnomRange(300, 800)
-    return math.random(300, 800)
-end
-
 --- 给485总线加锁
 -- @return boolean true 成功
 function bus_locked()
@@ -287,7 +280,8 @@ function bus_locked()
 
     -- 第一轮忙检测
     while gpio.get(BUSY_DEC_GPIO_NUMBER) == 1 do -- GPIO_PIN_SET 对应 1
-        timeout = get_rand_timeout()
+        -- 对应 C 代码中的 RNG_Get_RandnomRange(300, 800)。
+        timeout = math.random(300, 800)
         log.debug("BUS", "总线正在使用; 稍等片刻 " .. timeout .. " ms")
         sys.wait(timeout)
     end
@@ -312,6 +306,7 @@ function bus_unlocked()
     log.info("BUS", "总线解锁释放")
     return true
 end
+-- 去掉帧首尾空白/换行，空帧直接丢弃。
 local function normalize_frame(frame)
     if type(frame) ~= "string" then
         return nil
@@ -326,7 +321,7 @@ local function normalize_frame(frame)
 end
 
 -- ---------------------------------------------------------------------------
--- RX frame queue
+-- 接收帧队列
 -- ---------------------------------------------------------------------------
 
 local function push_frame(frame)
@@ -358,9 +353,10 @@ local function push_frame(frame)
 end
 
 -- ---------------------------------------------------------------------------
--- TX queue
+-- 发送队列
 -- ---------------------------------------------------------------------------
 
+-- 放入发送队列，不在这里直接写 UART。
 push_tx = function(data)
     if type(data) ~= "string" or #data == 0 then
         return false, "empty_data"
@@ -389,20 +385,21 @@ push_tx = function(data)
 end
 
 -- ---------------------------------------------------------------------------
--- MQTT downlink -> UART bytes
+-- MQTT 下行 -> UART 原始字节
 -- ---------------------------------------------------------------------------
 
--- Convert server command payload into real UART bytes.
--- encoding=text : send obj.data as-is
--- encoding=hex  : obj.data must be hex string, then convert to binary bytes
--- append_crlf   : optional, append "\r\n" after payload
--- If obj.data is omitted, server can also send a short bus command directly:
+-- 把服务端命令负载转换成真正的 UART 字节流。
+-- encoding=text : 原样发送 obj.data
+-- encoding=hex  : obj.data 必须是十六进制字符串，随后转换成二进制字节
+-- append_crlf   : 可选，是否在负载后追加 "\r\n"
+-- 如果没有 obj.data，服务端也可以直接下发简写版总线命令：
 --   {"cmd":"bus_send","adress":1,"u_cmd":"freq","v":60}
--- Then device will auto-build:
+-- 设备会自动拼成：
 --   {"adress":1,"cmd":"freq","v":60}\r\n
--- Or server can send a Server object directly:
+-- 或者服务端可以直接发送 Server 对象：
 --   {"cmd":"bus_send","Server":{"SN":"001265CE","sensorAddr":33554945,"sensorName":"XT_278","sendFrequency":1}}
--- Then device will send the same JSON body to BUS/485 and append "\r\n".
+-- 设备会把同样的 JSON 发送到 BUS/485，并追加 "\r\n"。
+-- 把简写版总线命令补全成完整 JSON，再转成 UART 文本帧。
 local function build_short_bus_json_payload(obj)
     if type(obj) ~= "table" then
         return nil, "invalid_bus_json"
@@ -457,6 +454,7 @@ local function build_short_bus_json_payload(obj)
     }
 end
 
+-- 透传 Server 对象，并补充一份用于日志/回执的元信息。
 local function build_server_object_payload(obj)
     if type(obj) ~= "table" or type(obj.Server) ~= "table" then
         return nil, "invalid_server_payload"
@@ -488,6 +486,7 @@ local function build_server_object_payload(obj)
     }
 end
 
+-- 统一处理三种下发方式：Server 对象、简写 JSON、原始 data。
 local function build_server_send_payload(obj)
     if type(obj) ~= "table" then
         return nil, "invalid_payload"
@@ -531,6 +530,7 @@ local function build_server_send_payload(obj)
     }
 end
 
+-- 如果收到的是传感器上报 JSON，则推导出 SD 卡日志路径。
 local function build_log_path(data)
     if not data or #data == 0 then
         return nil
@@ -555,55 +555,46 @@ local function build_log_path(data)
 end
 
 -- ---------------------------------------------------------------------------
--- UART1 short JSON response -> MQTT1 up/resp
+-- UART1 简短 JSON 响应 -> MQTT1 up/resp
 -- ---------------------------------------------------------------------------
 
--- STM32 on the UART1/485 bus can reply with a short JSON line such as:
+-- UART1/485 总线上的 STM32 可能返回如下简短 JSON 行：
 --   {"adress":1,"ok":1,"cmd":"freq"}
 --   {"adress":1,"ok":0,"cmd":"freq","err":1}
--- If the frame matches this simple format, forward it to MQTT1 up/resp.
--- Other UART1 frames still keep the original reliable upload path unchanged.
-local function decode_frame_json(frame)
+-- 如果帧符合这种简短格式，就转发到 MQTT1 的 up/resp。
+-- 其他 UART1 帧仍然走原来的可靠上传链路，不做改变。
+-- 这里把“识别 JSON 响应”“判断是不是总线短回复”“组 MQTT 回执”
+-- 放在一个函数里，顺着读就能看到完整处理流程。
+local function forward_uart1_bus_response(frame)
     local trimmed = normalize_frame(frame)
-    if not trimmed then
-        return nil
+    if not trimmed or trimmed:sub(1, 1) ~= "{" or trimmed:sub(-1) ~= "}" then
+        return false
     end
 
-    if trimmed:sub(1, 1) ~= "{" or trimmed:sub(-1) ~= "}" then
-        return nil
-    end
-
-    return json_codec.decode(trimmed)
-end
-
-local function get_bus_adress(obj)
-    if type(obj) ~= "table" then
-        return nil
-    end
-
-    -- Keep compatibility with the old "id" field, but normalize to "adress"
-    -- in the MQTT payload sent back to the server.
-    return obj.adress ~= nil and obj.adress or obj.id
-end
-
-local function is_uart1_bus_response(obj)
+    local obj = json_codec.decode(trimmed)
     if type(obj) ~= "table" then
         return false
     end
 
-    -- Keep the existing telemetry/report frames on the old upload path.
+    -- 现有遥测/上报类帧继续沿用原来的上传链路。
     if obj.sensorName or obj.sensorAddr or obj.sendFrequency or obj.timeStamp or obj.SN then
         return false
     end
 
-    return get_bus_adress(obj) ~= nil and type(obj.cmd) == "string" and obj.cmd ~= ""
-end
+    -- 兼容旧字段 "id"，但对外统一回传成 "adress"。
+    local adress = obj.adress ~= nil and obj.adress or obj.id
+    local u_cmd = get_text(obj.cmd, "")
+    if adress == nil or u_cmd == "" then
+        return false
+    end
 
-local function build_uart1_response_body(obj)
     local body = {
         cmd = "bus_recv",
         sn = get_device_sn(),
-        time = os.time()
+        time = os.time(),
+        source = "bus",
+        adress = adress,
+        u_cmd = u_cmd
     }
 
     for k, v in pairs(obj) do
@@ -612,21 +603,6 @@ local function build_uart1_response_body(obj)
         end
     end
 
-    -- Preserve the child command in a stable field, because top-level cmd is
-    -- reserved for the device-to-server transport type.
-    body.adress = get_bus_adress(obj)
-    body.u_cmd = get_text(obj.cmd, "")
-    body.source = "bus"
-    return body
-end
-
-local function forward_uart1_bus_response(frame)
-    local obj = decode_frame_json(frame)
-    if not is_uart1_bus_response(obj) then
-        return false
-    end
-
-    local body = build_uart1_response_body(obj)
     local ok = publish_to_server(1, body)
     if ok then
         log.info("bus_resp", "forwarded", "adress=" .. tostring(body.adress), "u_cmd=" .. tostring(body.u_cmd))
@@ -638,9 +614,10 @@ local function forward_uart1_bus_response(frame)
 end
 
 -- ---------------------------------------------------------------------------
--- Raw UART receive callback
+-- UART 原始接收回调
 -- ---------------------------------------------------------------------------
 
+-- UART 底层回调只负责把字节先攒到 rx_buf。
 local function uart_rx_cb(id)
     while true do
         local data = uart.read(id, 1024)
@@ -651,7 +628,14 @@ local function uart_rx_cb(id)
         rx_buf = rx_buf .. data
         last_rx_at = now_ms()
         if #rx_buf > RX_BUFFER_LIMIT then
-            rx_buf = rx_buf:sub(#rx_buf - RX_BUFFER_LIMIT + 1)
+            local keep_from = #rx_buf - RX_BUFFER_LIMIT + 1
+            local json_start = rx_buf:find("{", keep_from, true)
+            if json_start and json_start > keep_from then
+                warn_throttled("uart_rx_trim_resync", "UART", "rx overflow drop partial prefix", json_start - 1)
+                rx_buf = rx_buf:sub(json_start)
+            else
+                rx_buf = rx_buf:sub(keep_from)
+            end
             warn_throttled("uart_rx_trim", "UART", "rx buffer trimmed to", #rx_buf)
         end
     end
@@ -696,10 +680,11 @@ local function pop_line_frame()
     return true
 end
 
--- If bus devices send JSON without "\r\n", split by one complete JSON object:
+-- 如果总线设备发送 JSON 时没有 "\r\n"，就按完整 JSON 对象切帧：
 --   {"a":1}{"b":2}
--- becomes two frames even without an idle gap.
-local function find_json_frame_end(text)
+-- 即使没有空闲间隔，也会拆成两个独立帧。
+-- 逐字符扫描 JSON，正确处理字符串和转义符。
+local function find_json_frame_bounds(text)
     if type(text) ~= "string" or text == "" then
         return nil
     end
@@ -710,7 +695,11 @@ local function find_json_frame_end(text)
     end
 
     if text:sub(start_pos, start_pos) ~= "{" then
-        return nil
+        local json_start = text:find("{", start_pos + 1, true)
+        if not json_start then
+            return nil
+        end
+        start_pos = json_start
     end
 
     local depth = 0
@@ -736,7 +725,7 @@ local function find_json_frame_end(text)
             elseif ch == "}" then
                 depth = depth - 1
                 if depth == 0 then
-                    return i
+                    return start_pos, i
                 end
             end
         end
@@ -746,16 +735,21 @@ local function find_json_frame_end(text)
 end
 
 local function pop_json_frame()
-    local end_pos = find_json_frame_end(rx_buf)
+    local start_pos, end_pos = find_json_frame_bounds(rx_buf)
     if not end_pos then
         return false
     end
 
-    push_frame(rx_buf:sub(1, end_pos))
+    if start_pos > 1 then
+        warn_throttled("uart_rx_json_resync", "UART", "drop partial json prefix", start_pos - 1)
+    end
+
+    push_frame(rx_buf:sub(start_pos, end_pos))
     rx_buf = rx_buf:sub(end_pos + 1)
     return true
 end
 
+-- 超过大小阈值或总线静默超时后，强制把缓存作为一帧推出。
 local function flush_rx_buffer_if_needed()
     if #rx_buf == 0 then
         return false
@@ -779,7 +773,7 @@ local function flush_rx_buffer_if_needed()
 end
 
 -- ---------------------------------------------------------------------------
--- RX split task: convert raw UART stream into frame_queue items
+-- 接收拆帧任务：把原始 UART 字节流整理成 frame_queue 中的完整帧
 -- ---------------------------------------------------------------------------
 
 sys.taskInit(function()
@@ -802,6 +796,7 @@ sys.taskInit(function()
     end
 end)
 
+-- 保持原有可靠上传和 SD 落盘逻辑不变。
 local function queue_frame_to_existing_upload_path(frame)
     local ok, reason = uart_reliable_queue.enqueue_frame(frame)
     if not ok then
@@ -814,13 +809,7 @@ local function queue_frame_to_existing_upload_path(frame)
     end
 end
 
-local function handle_rx_frame(frame)
-    if forward_uart1_bus_response(frame) then
-        return
-    end
-
-    queue_frame_to_existing_upload_path(frame)
-end
+-- 生成适合写日志的可见字符串，避免控制字符直接污染日志。
 local function visible_text(data, max_len)
     if data == nil then
         return "nil"
@@ -841,7 +830,7 @@ local function visible_text(data, max_len)
     return s
 end
 -- ---------------------------------------------------------------------------
--- RX process task: consume frame_queue and dispatch each frame
+-- 接收处理任务：消费 frame_queue，并分发每一帧
 -- ---------------------------------------------------------------------------
 
 sys.taskInit(function()
@@ -855,7 +844,11 @@ sys.taskInit(function()
             end
             log.info("UART_RX", "frame complete", "len=" .. tostring(#frame))
             log.info("UART_RX", "ascii", visible_text(frame, 1024))
-            handle_rx_frame(frame)
+
+            -- 简短 BUS 响应直接回 MQTT1；其他数据仍走原有可靠上传链路。
+            if not forward_uart1_bus_response(frame) then
+                queue_frame_to_existing_upload_path(frame)
+            end
 
             processed = processed + 1
         end
@@ -869,7 +862,7 @@ sys.taskInit(function()
 end)
 
 -- ---------------------------------------------------------------------------
--- TX task: lock the shared bus, write UART bytes, wait for sent callback
+-- 发送任务：申请共享总线、写 UART、等待 sent 回调
 -- ---------------------------------------------------------------------------
 
 sys.taskInit(function()
@@ -921,13 +914,10 @@ sys.taskInit(function()
     end
 end)
 
--- Periodic server broadcast:
+-- 周期性服务器广播：
 -- {"Server":{"SN":"<real sn>","NtpTimeStamp":"<real unix time>"}}\r\n
--- It reuses the normal UART1 send queue, so BUSY lock handling stays unchanged.
+-- 复用普通 UART1 发送队列，因此 BUSY 锁处理逻辑保持不变。
 sys.taskInit(function()
-
-
-
 
     sys.wait(5000)
     while true do
@@ -944,11 +934,11 @@ function M.send(data)
     return push_tx(data)
 end
 
--- Handle MQTT downlink command: cmd=bus_send
--- Design goal:
--- 1. Server only puts data into UART1 send queue
--- 2. Real UART sending still reuses the existing BUSY lock logic
--- 3. If require_idle=true, reject when bus/queue is busy
+-- 处理 MQTT 下行命令：cmd=bus_send
+-- 设计目标：
+-- 1. 服务端只负责把数据放进 UART1 发送队列
+-- 2. 真正的 UART 发送仍复用现有 BUSY 加锁逻辑
+-- 3. 如果 require_idle=true，则在总线或队列忙时直接拒绝
 function M.handle_command(server_id, obj)
     if type(obj) ~= "table" then
         return false

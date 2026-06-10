@@ -249,9 +249,6 @@ sys/{SN}/json/up/resp
 | `get_device_status` | 查询电池、电阻温度、SIM 信息、SD 容量 |
 | `get_sim_info` | 查询流量卡序列号(ICCID)等 SIM 信息 |
 | `get_error_log` | 查询错误日志 |
-| `backfill_data` | 按时间段补录历史数据 |
-| `sensor_power` | 控制 GPIO16 传感器 12V 电源 |
-| `set_sensor_power` | `sensor_power` 的兼容别名 |
 
 ### 8.1 查询 SIM 信息
 
@@ -295,53 +292,189 @@ sys/{SN}/json/up/resp
 - `result = 0` 表示查询成功。
 - `result = -1` 表示当前没有读到 `iccid`，例如 SIM 未就绪。
 
-## 9. OTA
-
-OTA 只走 MQTT1。
+### 8.2 查询错误日志
 
 下发 Topic：
+```text
+sys/{SN}/json/down/cmd
+```
+
+Payload 示例：
+```json
+{
+  "cmd": "get_error_log",
+  "request_id": "errlog-20260527-001",
+  "limit": 10
+}
+```
+
+字段说明：
+- `request_id`：请求编号，建议唯一
+- `limit`：本次最多返回多少条日志；默认 `10`，最大 `30`
+
+设备回包 Topic：
+```text
+sys/{SN}/json/up/resp
+```
+
+有日志时的回包示例：
+```json
+{
+  "request_id": "errlog-20260527-001",
+  "cmd": "get_error_log",
+  "result": 0,
+  "reason": "ok",
+  "status": "ok",
+  "sn": "12345678",
+  "imei": "868120000000001",
+  "project": "MQTT",
+  "version": "001.000.002",
+  "firmware": "MQTT-001.000.002",
+  "core_version": "LuatOS-SoC_xxx",
+  "log_path": "/sd/error/latest.log",
+  "total_entries": 6,
+  "part": 1,
+  "total_parts": 2,
+  "time": 1779852000,
+  "entries": [
+    {
+      "ts": 1779851800,
+      "time": "2026-05-27 11:03:20",
+      "tag": "sd",
+      "message": "fault sd_writer_open_failed count=1"
+    },
+    {
+      "ts": 1779851810,
+      "time": "2026-05-27 11:03:30",
+      "tag": "mqtt",
+      "message": "json decode failed"
+    }
+  ]
+}
+```
+
+没有日志时的回包示例：
+```json
+{
+  "request_id": "errlog-20260527-001",
+  "cmd": "get_error_log",
+  "result": 0,
+  "reason": "empty",
+  "status": "empty",
+  "sn": "12345678",
+  "log_path": "/sd/error/latest.log",
+  "time": 1779852000,
+  "entries": []
+}
+```
+
+说明：
+- 单条回包最多带 `4` 条日志；如果日志较多，会按 `part / total_parts` 分多条返回
+- `entries[*].tag` 表示故障来源，例如 `sd`、`mqtt`、`reliable_uart`
+- `entries[*].message` 是实际错误内容，服务器可直接展示或入库
+- 设备会把错误日志追加写入 `/sd/error/latest.log`
+- 同时也会按天写入 `/sd/error/daily/YYYYMMDD.log`
+- 如果故障发生得很早，`error_logger` 还没完全起来，设备也会先缓存，再在模块就绪后补写到错误日志
+
+## 9. OTA 简明说明
+
+最后更新：2026-04-03
+
+这份文档只保留 OTA 对接必须知道的内容。
+
+### 9.1 Topic
+
+下发：
 
 ```text
 sys/{SN}/ota/down/update
 ```
 
-回包 Topic：
+回包：
 
 ```text
 sys/{SN}/ota/up/resport
 ```
 
-## 10. mosquitto 示例
+说明：
 
-订阅设备响应：
+- OTA 只走 MQTT1
+- 回包 topic 固定是 `resport`
 
-```bash
-mosquitto_sub -h 127.0.0.1 -p 8883 --cafile rootCA.crt -u admin -P 123456 -t "sys/+/json/up/resp" -v
+### 9.2 推荐下发格式
+
+服务器建议发最简单的 JSON：
+
+```json
+{
+  "request_id": "ota-001",
+  "url": "http://example.com/ota/firmware.bin",
+  "md5": "d41d8cd98f00b204e9800998ecf8427e"
+}
 ```
 
-订阅 485 上报：
+字段说明：
 
-```bash
-mosquitto_sub -h 127.0.0.1 -p 8883 --cafile rootCA.crt -u admin -P 123456 -t "sys/+/json/up/realTime" -v
+- `request_id`：请求编号，建议唯一
+- `url`：升级包地址，必填
+- `md5`：文件 MD5，可选；如果填写，设备会先做真校验
+
+### 9.3 设备处理流程
+
+1. 设备收到 OTA 请求
+2. 检查 `url`
+3. 回 `verify_start`
+4. 临时下载升级包
+5. 计算文件 MD5
+6. 一致回 `verify_ok`
+7. 然后回 `start`
+8. 开始 OTA
+9. 成功回 `success`
+10. 失败回 `verify_failed` 或 `failed`
+
+补充说明：
+
+- 当前 `md5` 是真校验
+- 带 `md5` 时，设备会多下载一次升级包用于校验
+
+### 9.4 回包字段
+
+设备回包尽量简化，只保留这些：
+
+```json
+{
+  "request_id": "ota-001",
+  "status": "success",
+  "message": "upgrade package downloaded",
+  "sn": "123456789",
+  "time": 1775188800
+}
 ```
 
-订阅 OTA 回包：
+失败时可能多一个 `result_code`：
 
-```bash
-mosquitto_sub -h 127.0.0.1 -p 8883 --cafile rootCA.crt -u admin -P 123456 -t "sys/+/ota/up/resport" -v
+```json
+{
+  "request_id": "ota-001",
+  "status": "failed",
+  "message": "package download failed",
+  "sn": "123456789",
+  "time": 1775188810,
+  "result_code": 4
+}
 ```
 
-下发时间同步：
+### 9.5 常见状态
 
-```bash
-mosquitto_pub -h 127.0.0.1 -p 8883 --cafile rootCA.crt -u admin -P 123456 -t "sys/123456/json/down/resp" -m "{\"cmd\":\"timeSync\",\"request_id\":\"timereq-1-1774470000\",\"serverTime\":1774470000,\"timezone\":\"+08:00\"}"
-```
-
-下发 SM4：
-
-```bash
-mosquitto_pub -h 127.0.0.1 -p 8883 --cafile rootCA.crt -u admin -P 123456 -t "sys/123456/json/down/cmd" -m "{\"cmd\":\"set_sm4\",\"request_id\":\"sm4-20260327-001\",\"key\":\"1234567890123456\",\"iv\":\"1234567890666666\"}"
-```
+- `invalid_payload`
+- `duplicate`
+- `busy`
+- `verify_start`
+- `verify_ok`
+- `verify_failed`
+- `start`
+- `success`
+- `failed`
 
 ## 11. Periodic Device Status
 
@@ -387,365 +520,16 @@ SD 日志路径：
 - 服务器需要先做 SM4 解密，再判断明文内容
 - 如果解密后是包含 `sendFrequency`、`tcase`、`batteryVoltage`、`cardMemory` 的 JSON，则按设备状态处理
 - 如果解密后不是这类状态 JSON，则按 485 业务数据处理
-## 12. BUS 总线直发命令
-
-服务器可以通过 MQTT1 直接下发数据到设备的 `BUS/485` 总线。
-
-下发 Topic：
-```text
-sys/{SN}/json/down/cmd
-```
-
-回包 Topic：
-```text
-sys/{SN}/json/up/resp
-```
-
-命令字：
-```text
-bus_send
-```
-
-### 12.1 文本方式
-
-```json
-{
-  "cmd": "bus_send",
-  "request_id": "bus-001",
-  "encoding": "text",
-  "data": "hello",
-  "append_crlf": true
-}
-```
-
-说明：
-- `encoding=text` 表示把 `data` 原样发到 UART1
-- `append_crlf=true` 时，设备会自动追加 `\r\n`
-
-### 12.2 HEX 方式
-
-```json
-{
-  "cmd": "bus_send",
-  "request_id": "bus-002",
-  "encoding": "hex",
-  "data": "010300000002C40B"
-}
-```
-
-说明：
-- `encoding=hex` 时，`data` 必须是 HEX 字符串
-- 设备会先把 HEX 转成二进制，再发到 UART1
-
-### 12.3 空闲要求
-
-如果你希望“只有总线完全空闲时才允许发送”，可以加：
-
-```json
-{
-  "cmd": "bus_send",
-  "request_id": "bus-003",
-  "encoding": "hex",
-  "data": "010300000002C40B",
-  "require_idle": true
-}
-```
-
-说明：
-- 回包只保留最核心字段：`cmd / request_id / result / reason / sn / time`
-- 如果命令里带了总线目标信息，会额外回 `adress / u_cmd`
-- 不再返回 `encoding / bytes / bus_busy / queue_pending / tx_queue_len` 这类调试字段
-
-说明：
-- `require_idle=true` 时，如果当前 BUSY 锁已被占用，或者 UART1 发送队列里还有未发数据，设备会直接拒绝
-- 不带 `require_idle` 时，设备会先入发送队列，后续仍然按现有 BUSY 锁逻辑发送
-
-### 12.4 回包说明
-
-成功入队示例：
-
-```json
-{
-  "cmd": "bus_send",
-  "request_id": "bus-002",
-  "result": 0,
-  "reason": "queued",
-  "sn": "123456",
-  "time": 1775000000,
-  "adress": 1,
-  "u_cmd": "freq"
-}
-```
-
-总线忙但允许排队示例：
-
-```json
-{
-  "cmd": "bus_send",
-  "request_id": "bus-004",
-  "result": 0,
-  "reason": "queued_busy",
-  "sn": "123456",
-  "time": 1775000001,
-  "adress": 1,
-  "u_cmd": "freq"
-}
-```
-
-拒绝发送示例：
-
-```json
-{
-  "cmd": "bus_send",
-  "request_id": "bus-003",
-  "result": -1,
-  "reason": "bus_busy",
-  "sn": "123456",
-  "time": 1775000002,
-  "adress": 1,
-  "u_cmd": "freq"
-}
-```
-
-### 12.5 设备侧行为
-
-- 这条命令只接到 MQTT1
-- 服务器下发的数据不会直接绕过 BUSY 锁发串口
-- 设备只是先把数据放进 UART1 发送队列
-- 真正 `uart.write()` 前，仍然会走现有的 BUSY 锁检测和抢占流程
-- 所以这条接口适合远程调试、远程下发 485 指令，不会破坏当前总线仲裁逻辑
-## 0. BUS(485) 总线设备推荐 JSON 格式
-
-如果服务器需要通过设备的 `BUS/485` 去控制总线上挂载的 STM32 设备，推荐统一使用短字段的文本 JSON。
-
-推荐原因：
-- 文本格式方便调试
-- STM32 侧容易解析
-- 后续新增命令时不需要重做协议
-
-推荐约定：
-- 一条指令一行，结尾追加 `\\r\\n`
-- MQTT 下发到设备时使用 `encoding=text`
-- 总线 JSON 字段尽量短，不要太长太复杂
-
-推荐的总线 JSON：
-
-```json
-{"adress":1,"cmd":"freq","v":60}
-```
-
-字段说明：
-- `adress`：总线设备地址或设备号
-- `cmd`：命令字
-- `v`：参数值
-
-推荐先保留这几个常用命令：
-
-1. 修改上传频率
-
-```json
-{"adress":1,"cmd":"freq","v":60}
-```
-
-说明：
-- `v` 建议直接用秒
-- 例如 `60` 表示 60 秒上传一次
-
-2. 重启设备
-
-```json
-{"adress":1,"cmd":"reboot"}
-```
-
-3. 读取当前配置
-
-```json
-{"adress":1,"cmd":"get"}
-```
-
-4. 恢复默认配置
-
-```json
-{"adress":1,"cmd":"reset"}
-```
-
-推荐的 STM32 应答 JSON：
-
-成功：
-
-```json
-{"adress":1,"ok":1,"cmd":"freq"}
-```
-
-失败：
-
-```json
-{"adress":1,"ok":0,"cmd":"freq","err":1}
-```
-
-字段说明：
-- `ok`：`1` 成功，`0` 失败
-- `err`：错误码，建议使用数字
-
-如果服务器通过 MQTT 下发到设备，再由设备转发到 UART1，推荐这样写：
-
-修改上传频率：
-
-```json
-{
-  "cmd": "bus_send",
-  "request_id": "bus-freq-001",
-  "encoding": "text",
-  "data": "{\"adress\":1,\"cmd\":\"freq\",\"v\":60}",
-  "append_crlf": true
-}
-```
-
-重启设备：
-
-```json
-{
-  "cmd": "bus_send",
-  "request_id": "bus-reboot-001",
-  "encoding": "text",
-  "data": "{\"adress\":1,\"cmd\":\"reboot\"}",
-  "append_crlf": true
-}
-```
-
-建议：
-- `cmd` 保持短小固定，例如 `freq / reboot / get / reset`
-- 参数字段尽量统一，例如都用 `v`
-- 不建议在总线 JSON 里塞太多说明性字段
-- 如果后续还要加别的控制项，也尽量保持这个短字段风格
-## 0. BUS(485) STM32 回包转 MQTT
-
-如果总线上的 STM32 设备通过 BUS/485 回包，推荐也使用短字段文本 JSON。
-
-推荐 STM32 回包：
-
-成功：
-
-```json
-{"adress":1,"ok":1,"cmd":"freq"}
-```
-
-失败：
-
-```json
-{"adress":1,"ok":0,"cmd":"freq","err":1}
-```
-
-读取配置：
-
-```json
-{"adress":1,"ok":1,"cmd":"get","freq":60}
-```
-
-设备侧转发规则：
-- 只要 BUS 收到的是这类短 JSON
-- 并且包含 `adress` 和 `cmd`
-- 设备就会把它转发到 MQTT1
-- 转发 Topic：`sys/{SN}/json/up/resp`
-
-转发后的 MQTT Payload 示例：
-
-```json
-{
-  "cmd": "bus_recv",
-  "u_cmd": "freq",
-  "source": "bus",
-  "adress": 1,
-  "ok": 1,
-  "sn": "123456",
-  "time": 1775000100
-}
-```
-
-说明：
-- 顶层 `cmd` 固定为 `bus_recv`
-- `u_cmd` 表示总线设备原始命令字
-- `adress / ok / err / freq` 这类字段会直接保留，方便服务器直接取值
-- 如果 BUS 收到的不是这类短 JSON，仍然走原来的 485 数据上报链路，不会进这条回包转发逻辑
-## 0. BUS(485) 简化下发命令
-
-为了方便服务器和 STM32 对接，`BUS/485` 现在支持两种下发方式：
-
-1. 原始透传方式
-自己拼好 `data`
-
-2. 简化 JSON 方式
-服务器直接传 `adress / u_cmd / v`
-
-推荐优先使用第 2 种，最简单。
-
-### 推荐下发格式
-
-修改上传频率：
-
-```json
-{
-  "cmd": "bus_send",
-  "request_id": "bus-freq-001",
-  "adress": 1,
-  "u_cmd": "freq",
-  "v": 60
-}
-```
-
-设备重启：
-
-```json
-{
-  "cmd": "bus_send",
-  "request_id": "bus-reboot-001",
-  "adress": 1,
-  "u_cmd": "reboot"
-}
-```
-
-读取配置：
-
-```json
-{
-  "cmd": "bus_send",
-  "request_id": "bus-get-001",
-  "adress": 1,
-  "u_cmd": "get"
-}
-```
-
-### 设备内部实际发到 UART1 的内容
-
-例如上面这条：
-
-```json
-{
-  "cmd": "bus_send",
-  "adress": 1,
-  "u_cmd": "freq",
-  "v": 60
-}
-```
-
-设备会自动转成：
-
-```json
-{"adress":1,"cmd":"freq","v":60}
-```
-
-并自动追加 `\r\n` 后发到 `BUS/485`。
-
-### 说明
-
-- `adress`：总线地址
-- `u_cmd`：总线设备命令字
-- `v`：参数值
-- 如果还要加别的参数，也可以继续放在同一层，设备会一起带到总线 JSON 里
-- 如果服务器仍然想完全自己控制原始报文，也可以继续使用原来的 `data + encoding` 方式
 ## 13. BUS 设备配置下发（以本节为准）
 
 如果服务器要通过设备去配置总线上的传感器，推荐直接使用 `Server` 嵌套 JSON。
+
+对接时请先区分两层概念：
+- MQTT 下发到设备时，仍然走 `sys/{SN}/json/down/cmd`
+- MQTT Payload 外层 `cmd` 固定为 `bus_send`
+- 设备真正发到 `BUS/485(UART1)` 的内容，是里面那段 `Server` JSON
+- 设备会自动在末尾追加 `\r\n`
+- 如果不是走 MQTT，而是你们自己的程序直接连串口发 485，那么可以直接发送下面“设备实际发到 BUS/485 的内容”
 
 下发 Topic：
 ```text
@@ -777,7 +561,8 @@ bus_send
 说明：
 - 这条命令表示修改总线设备 `XT_278`
 - 目标地址是 `33554945`
-- 上传频率改为 `1`
+- `sendFrequency` 就是设备的上传频率字段
+- 该字段会原样透传到 485 总线，不会被网关改写
 
 设备实际发到 BUS/485 的内容：
 
@@ -785,9 +570,7 @@ bus_send
 {"Server":{"SN":"001265CE","sensorAddr":33554945,"sensorName":"XT_278","sendFrequency":1}}
 ```
 
-设备会自动追加 `\r\n` 后发到总线。
-
-### 13.2 设置开关状态
+### 13.2 修改设备电源开关
 
 服务器下发：
 
@@ -806,7 +589,8 @@ bus_send
 
 说明：
 - `status=0` 表示关闭
-- 如果设备协议定义 `1` 为打开、`0` 为关闭，服务器就按这个传
+- `status=1` 表示打开
+- 这个 `status` 字段同样会原样发到 485，总线设备按自己的协议解释
 
 设备实际发到 BUS/485 的内容：
 
@@ -814,9 +598,36 @@ bus_send
 {"Server":{"SN":"001265CE","sensorAddr":33554945,"sensorName":"XT_278","status":0}}
 ```
 
-设备会自动追加 `\r\n` 后发到总线。
+### 13.3 触发历史补录
 
-### 13.3 回包说明
+服务器下发：
+
+```json
+{
+  "cmd": "bus_send",
+  "request_id": "bus-backfill-001",
+  "Server": {
+    "SN": "12345678"
+    "sensorAddr": 33555713,
+    "sensorName": "HMP155",
+    "startTs": 1779849317,
+    "endTs": 1779852917
+  }
+}
+```
+
+说明：
+- `startTs` 和 `endTs` 是 Unix 时间戳，单位为秒
+- 这条命令表示要求总线设备补录 `[startTs, endTs]` 这个时间范围内的数据
+- 设备网关不解析补录业务本身，只负责把这段 `Server` JSON 原样送到 485 串口
+
+设备实际发到 BUS/485 的内容：
+
+```json
+{"Server":{"SN":"001265CE","sensorAddr":33554945,"sensorName":"XT_278","startTs":1716811200,"endTs":1716814800}}
+```
+
+### 13.4 回包说明
 
 如果设备已经成功进入 UART1 发送队列，会回：
 
@@ -832,7 +643,7 @@ bus_send
 }
 ```
 
-如果当前总线忙，但允许排队，可能回：
+如果当前总线已有数据在发送，设备会先放进发送队列，可能回：
 
 ```json
 {
@@ -846,261 +657,23 @@ bus_send
 }
 ```
 
-如果服务器要求总线必须完全空闲才允许发，并且当前总线正忙，会回：
+补录这类“纯透传” `Server` 指令也会回排队结果，但当前网关不一定补 `u_cmd`：
 
 ```json
 {
   "cmd": "bus_send",
-  "request_id": "bus-set-status-001",
-  "result": -1,
-  "reason": "bus_busy",
+  "request_id": "bus-backfill-001",
+  "result": 0,
+  "reason": "queued",
   "sn": "123456789",
-  "time": 1775110202,
-  "u_cmd": "status"
+  "time": 1775110202
 }
 ```
 
-### 13.4 兼容说明
+### 13.5 对接建议
 
-- 这一节是服务器对接总线设备配置的推荐格式
-- 推荐优先使用 `Server` 嵌套 JSON
-- 设备仍然保留原来的 `data + encoding=text/hex` 透传方式
-- 如果后面还要增加别的总线配置项，也建议继续放在 `Server` 对象里
-
-## OTA 对接补充（2026-04-03 版，以本节为准）
-
-下面这节是当前 OTA 的最新对接说明，优先级高于前面的旧描述。
-
-### OTA Topic
-
-下发 Topic：
-
-```text
-sys/{SN}/ota/down/update
-```
-
-状态回包 Topic：
-
-```text
-sys/{SN}/ota/up/resport
-```
-
-说明：
-
-- `resport` 是当前项目代码中的实际 Topic 名称，服务器请按这个值订阅。
-- MQTT2 不参与 OTA。
-
-### 推荐下发 JSON
-
-```json
-{
-  "request_id": "ota-20260403-001",
-  "url": "http://example.com/ota/firmware.bin",
-  "version": "1.0.3",
-  "force": false,
-  "timeout": 300000,
-  "md5": "d41d8cd98f00b204e9800998ecf8427e"
-}
-```
-
-字段说明：
-
-- `request_id`：请求编号，建议唯一
-- `url`：升级包地址，必填
-- `version`：目标版本，可选
-- `force`：是否强制升级，可选
-- `timeout`：下载超时毫秒数，可选
-- `md5`：升级包文件的 MD5，可选；如果填写，设备会先做真校验
-
-### 不带 md5 的流程
-
-1. 设备收到 OTA 消息
-2. 校验 payload 和 `url`
-3. 如果填写了 `version` 且 `force=false`，先比较版本
-4. 回 `start`
-5. 正式执行 OTA
-6. 成功回 `success`
-7. 失败回 `failed`
-
-### 带 md5 的流程
-
-1. 设备收到 OTA 消息
-2. 校验 payload 和 `url`
-3. 如果填写了 `version` 且 `force=false`，先比较版本
-4. 回 `verify_start`
-5. 临时下载升级包到本地文件
-6. 用 `crypto.md_file("MD5", path)` 计算文件 MD5
-7. 一致则回 `verify_ok`
-8. 然后回 `start`
-9. 正式执行 OTA
-10. 成功回 `success`
-11. 校验失败回 `verify_failed`
-12. 正式 OTA 失败回 `failed`
-
-说明：
-
-- 当前 `md5` 是真校验，不是只检查字段。
-- 因为 `libfota2` 不会把正式下载的文件路径回给 Lua，所以设备会先临时下载一份做校验，再正式升级一次。
-- 这意味着带 `md5` 时，服务器侧会被下载两次升级包。
-
-### OTA 回包状态
-
-常见状态如下：
-
-- `invalid_payload`
-- `already_latest`
-- `duplicate`
-- `busy`
-- `verify_start`
-- `verify_ok`
-- `verify_failed`
-- `start`
-- `success`
-- `failed`
-
-### 回包示例
-
-MD5 校验通过：
-
-```json
-{
-  "request_id": "ota-20260403-001",
-  "status": "verify_ok",
-  "message": "ota md5 verify ok",
-  "sn": "123456789",
-  "imei": "864793080300333",
-  "project": "LuaTest",
-  "version": "1.0.2",
-  "firmware": "LuaTest-1.0.2",
-  "core_version": "LuatOS-SoC_xxx",
-  "target_version": "1.0.3",
-  "url": "###http://example.com/ota/firmware.bin",
-  "md5": "d41d8cd98f00b204e9800998ecf8427e",
-  "source_server": 1,
-  "source_topic": "sys/123456789/ota/down/update",
-  "result_code": null,
-  "time": 1775188800
-}
-```
-
-MD5 校验失败：
-
-```json
-{
-  "request_id": "ota-20260403-002",
-  "status": "verify_failed",
-  "message": "md5 mismatch expected=... actual=...",
-  "sn": "123456789",
-  "result_code": -2,
-  "time": 1775188810
-}
-```
-
-OTA 成功：
-
-```json
-{
-  "request_id": "ota-20260403-003",
-  "status": "success",
-  "message": "upgrade package downloaded",
-  "sn": "123456789",
-  "result_code": 0,
-  "time": 1775188820
-}
-```
-
-### mosquitto 示例
-
-下发 OTA：
-
-```bash
-mosquitto_pub -h 127.0.0.1 -p 8883 --cafile rootCA.crt -u admin -P 123456 -t "sys/123456789/ota/down/update" -m "{\"request_id\":\"ota-20260403-001\",\"url\":\"http://example.com/ota/firmware.bin\",\"version\":\"1.0.3\",\"force\":false,\"timeout\":300000,\"md5\":\"d41d8cd98f00b204e9800998ecf8427e\"}"
-```
-
-订阅 OTA 回包：
-
-```bash
-mosquitto_sub -h 127.0.0.1 -p 8883 --cafile rootCA.crt -u admin -P 123456 -t "sys/+/ota/up/resport" -v
-```
-
-## OTA 简化对接（最终以本节为准）
-
-如果服务器只想要最简单的 OTA 对接，请只记这几项。
-
-### Topic
-
-下发：
-
-```text
-sys/{SN}/ota/down/update
-```
-
-回包：
-
-```text
-sys/{SN}/ota/up/resport
-```
-
-### 推荐下发 JSON
-
-```json
-{
-  "request_id": "ota-001",
-  "url": "http://example.com/ota/firmware.bin",
-  "md5": "d41d8cd98f00b204e9800998ecf8427e"
-}
-```
-
-只需要这 3 个字段：
-
-- `request_id`
-- `url`
-- `md5`（可选）
-
-如果不做 MD5 校验：
-
-```json
-{
-  "request_id": "ota-001",
-  "url": "http://example.com/ota/firmware.bin"
-}
-```
-
-### 设备回包
-
-设备回包只保留最少字段：
-
-```json
-{
-  "request_id": "ota-001",
-  "status": "success",
-  "message": "upgrade package downloaded",
-  "sn": "123456789",
-  "time": 1775188800
-}
-```
-
-失败时可能带 `result_code`：
-
-```json
-{
-  "request_id": "ota-001",
-  "status": "failed",
-  "message": "package download failed",
-  "sn": "123456789",
-  "time": 1775188810,
-  "result_code": 4
-}
-```
-
-### 常见状态
-
-- `invalid_payload`
-- `duplicate`
-- `busy`
-- `verify_start`
-- `verify_ok`
-- `verify_failed`
-- `start`
-- `success`
-- `failed`
+- 服务器侧直接按本节的 `Server` JSON 对接即可
+- 本节不再展开 `text/hex` 透传写法
+- 如果后面还要增加别的总线配置项，继续放在 `Server` 对象里即可
+- 网关职责很简单：接收 MQTT，下发到 485，总线业务字段不做二次改写
+- 总线侧如果当时正在发送，设备会先入队，再按现有队列顺序继续下发

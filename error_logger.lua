@@ -368,6 +368,9 @@ end
 
 function M.install()
     installed = true
+    if sd and type(sd.flush_error_logs) == "function" then
+        pcall(sd.flush_error_logs)
+    end
 end
 
 function M.error(...)
