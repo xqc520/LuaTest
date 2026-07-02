@@ -76,10 +76,6 @@ sys/+/json/up/resp
 sys/+/ota/up/resport
 ```
 
-鏌ヨ娴侀噺鍗″簭鍒楀彿锛?
-```bash
-mosquitto_pub -h 127.0.0.1 -p 8883 --cafile rootCA.crt -u admin -P 123456 -t "sys/123456/json/down/cmd" -m "{\"cmd\":\"get_sim_info\",\"request_id\":\"sim-20260327-001\"}"
-```
 
 ## 4. 服务器最小实现
 
@@ -627,53 +623,12 @@ bus_send
 {"Server":{"SN":"001265CE","sensorAddr":33554945,"sensorName":"XT_278","startTs":1716811200,"endTs":1716814800}}
 ```
 
-### 13.4 回包说明
 
-如果设备已经成功进入 UART1 发送队列，会回：
-
-```json
-{
-  "cmd": "bus_send",
-  "request_id": "bus-set-freq-001",
-  "result": 0,
-  "reason": "queued",
-  "sn": "123456789",
-  "time": 1775110200,
-  "u_cmd": "sendFrequency"
-}
 ```
 
-如果当前总线已有数据在发送，设备会先放进发送队列，可能回：
-
-```json
-{
-  "cmd": "bus_send",
-  "request_id": "bus-set-status-001",
-  "result": 0,
-  "reason": "queued_busy",
-  "sn": "123456789",
-  "time": 1775110201,
-  "u_cmd": "status"
-}
-```
-
-补录这类“纯透传” `Server` 指令也会回排队结果，但当前网关不一定补 `u_cmd`：
-
-```json
-{
-  "cmd": "bus_send",
-  "request_id": "bus-backfill-001",
-  "result": 0,
-  "reason": "queued",
-  "sn": "123456789",
-  "time": 1775110202
-}
-```
-
-### 13.5 对接建议
+### 13.4 对接建议
 
 - 服务器侧直接按本节的 `Server` JSON 对接即可
-- 本节不再展开 `text/hex` 透传写法
 - 如果后面还要增加别的总线配置项，继续放在 `Server` 对象里即可
 - 网关职责很简单：接收 MQTT，下发到 485，总线业务字段不做二次改写
 - 总线侧如果当时正在发送，设备会先入队，再按现有队列顺序继续下发
